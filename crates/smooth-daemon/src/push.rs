@@ -1,7 +1,8 @@
 //! Web Push — Big Smooth pushes a notification to the user's phone (an installed
 //! PWA) even when the tab is closed. The browser subscribes (POST /push/subscribe
 //! with its endpoint + keys); the daemon VAPID-signs + encrypts a payload and
-//! POSTs it to that endpoint via the `web-push` crate; the service worker
+//! POSTs it to that endpoint (`web-push-native` builds the request, pure
+//! RustCrypto, no OpenSSL — SMOODEV-4114; our rustls reqwest sends it); the service worker
 //! (`public/push-sw.js`) wakes and shows the notification.
 //!
 //! VAPID keys come from `SMOOTH_VAPID_PUBLIC` / `SMOOTH_VAPID_PRIVATE` (raw
@@ -21,8 +22,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-#[cfg(not(target_os = "windows"))]
-use web_push::{ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushClient, WebPushMessageBuilder};
+use web_push_native::jwt_simple::algorithms::ES256KeyPair;
+use web_push_native::{Auth, WebPushBuilder};
 
 /// A browser push subscription (`PushSubscription.toJSON()`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -49,13 +50,7 @@ pub struct PushState {
 
 impl PushState {
     pub fn from_env() -> Self {
-        // Windows has no sender (see `send_to_all`), so it must not advertise a
-        // VAPID key either — handing one out would let the SPA register a
-        // service worker for pushes that can never arrive. Dropping the keys
-        // here makes every `/push/*` route 503 through the existing
-        // `enabled()` checks, no per-route cfg needed.
-        let configured = !cfg!(target_os = "windows");
-        let (public_key, private_key) = resolve_vapid_keys(configured);
+        let (public_key, private_key) = resolve_vapid_keys();
         Self {
             public_key,
             private_key,
@@ -88,65 +83,45 @@ impl PushState {
 
     /// Send `{title, body}` to every subscribed device. Expired subscriptions
     /// (410/404) are pruned. Best-effort: a failing endpoint never blocks the rest.
-    ///
-    /// **Windows: always a no-op.** The `web-push` crate reaches `ece`, which
-    /// hard-depends on `openssl` (no pure-Rust backend in 2.x) and finds no
-    /// OpenSSL on a stock Windows host. The dependency is therefore declared
-    /// only for non-Windows targets, which is what lets the rest of the daemon
-    /// — the whole agent engine — compile and run there at all. Subscribing
-    /// still 503s on Windows via [`Self::enabled`], so the SPA degrades
-    /// cleanly rather than half-registering a service worker. Windows push is
-    /// a follow-up (vendored OpenSSL, or a `web-push` release on `ece` 3.x).
-    #[cfg(target_os = "windows")]
     pub async fn send_to_all(&self, title: &str, body: &str) -> usize {
-        let _ = (title, body);
-        tracing::debug!("web push is not available on Windows (web-push -> ece -> openssl); skipping notification");
-        0
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    pub async fn send_to_all(&self, title: &str, body: &str) -> usize {
-        if !self.enabled() {
+        let Some(private) = self.private_key.as_deref().filter(|_| self.enabled()) else {
             return 0;
-        }
-        let private = self.private_key.clone().unwrap();
-        let payload = serde_json::json!({ "title": title, "body": body }).to_string();
-        let client = match web_push::IsahcWebPushClient::new() {
-            Ok(c) => c,
+        };
+        let key_pair = match vapid_key_pair(private) {
+            Ok(k) => k,
             Err(e) => {
-                tracing::warn!(error = %e, "web-push client init failed");
+                tracing::warn!(error = %e, "invalid VAPID private key; push disabled");
                 return 0;
             }
         };
+        let payload = serde_json::json!({ "title": title, "body": body }).to_string();
+        let client = reqwest::Client::new();
         let subs = self.load_subs();
         let mut kept = Vec::with_capacity(subs.len());
         let mut sent = 0;
         for sub in subs {
-            let info = SubscriptionInfo::new(sub.endpoint.clone(), sub.keys.p256dh.clone(), sub.keys.auth.clone());
-            let msg = (|| {
-                let mut sig = VapidSignatureBuilder::from_base64(&private, &info)?;
-                sig.add_claim("sub", "mailto:dev@smoo.ai");
-                let mut builder = WebPushMessageBuilder::new(&info);
-                builder.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
-                builder.set_vapid_signature(sig.build()?);
-                builder.build()
-            })();
-            match msg {
-                Ok(m) => match client.send(m).await {
-                    Ok(()) => {
-                        sent += 1;
-                        kept.push(sub);
-                    }
-                    Err(web_push::WebPushError::EndpointNotValid(_) | web_push::WebPushError::EndpointNotFound(_)) => {
-                        tracing::info!(endpoint = %sub.endpoint, "pruning expired push subscription");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "web-push send failed");
-                        kept.push(sub);
-                    }
-                },
+            let req = match build_push_request(&sub, &key_pair, payload.as_bytes()) {
+                Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "web-push build failed");
+                    kept.push(sub);
+                    continue;
+                }
+            };
+            match send_request(&client, req).await {
+                Ok(status) if status.is_success() => {
+                    sent += 1;
+                    kept.push(sub);
+                }
+                Ok(status) if is_expired_status(status) => {
+                    tracing::info!(endpoint = %sub.endpoint, %status, "pruning expired push subscription");
+                }
+                Ok(status) => {
+                    tracing::warn!(endpoint = %sub.endpoint, %status, "web-push send rejected");
+                    kept.push(sub);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "web-push send failed");
                     kept.push(sub);
                 }
             }
@@ -154,6 +129,54 @@ impl PushState {
         self.save_subs(&kept).await;
         sent
     }
+}
+
+/// The push service says the subscription is gone (RFC 8030 §7.3: 410; FCM
+/// and Mozilla also answer 404) — drop it rather than retry forever.
+fn is_expired_status(status: StatusCode) -> bool {
+    status == StatusCode::GONE || status == StatusCode::NOT_FOUND
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Parse the raw base64url VAPID private scalar (the `generate-vapid-keys` format).
+fn vapid_key_pair(private_b64: &str) -> Result<ES256KeyPair, BoxError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(private_b64.trim_end_matches('='))?;
+    Ok(ES256KeyPair::from_bytes(&bytes).map_err(|e| e.to_string())?)
+}
+
+/// Encrypt (RFC 8291 aes128gcm) + VAPID-sign (RFC 8292) one notification for
+/// one subscription. Pure — no I/O, so it is unit-testable end to end.
+fn build_push_request(sub: &Subscription, key_pair: &ES256KeyPair, payload: &[u8]) -> Result<axum::http::Request<Vec<u8>>, BoxError> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let p256dh = b64.decode(sub.keys.p256dh.trim_end_matches('='))?;
+    let auth = b64.decode(sub.keys.auth.trim_end_matches('='))?;
+    if auth.len() != 16 {
+        return Err(format!("push auth secret must be 16 bytes, got {}", auth.len()).into());
+    }
+    let builder = WebPushBuilder::new(
+        sub.endpoint.parse()?,
+        web_push_native::p256::PublicKey::from_sec1_bytes(&p256dh)?,
+        Auth::clone_from_slice(&auth),
+    )
+    .with_vapid(key_pair, "mailto:dev@smoo.ai");
+    Ok(builder.build(payload.to_vec())?)
+}
+
+async fn send_request(client: &reqwest::Client, req: axum::http::Request<Vec<u8>>) -> Result<StatusCode, reqwest::Error> {
+    let (mut parts, body) = req.into_parts();
+    // reqwest derives Content-Length from the body; don't send it twice.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    let resp = client
+        .post(parts.uri.to_string())
+        .headers(parts.headers)
+        .body(body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?;
+    Ok(resp.status())
 }
 
 fn subs_path() -> PathBuf {
@@ -187,31 +210,19 @@ struct VapidFile {
 
 /// Resolve the VAPID keypair for [`PushState`]. Precedence: explicit
 /// `SMOOTH_VAPID_PUBLIC`/`_PRIVATE` env → the persisted `~/.smooth/vapid.json` →
-/// a freshly generated pair (persisted for next time). `configured == false`
-/// (Windows) short-circuits to no keys, keeping push disabled there.
-fn resolve_vapid_keys(configured: bool) -> (Option<String>, Option<String>) {
-    if !configured {
-        return (None, None);
-    }
+/// a freshly generated pair (persisted for next time).
+fn resolve_vapid_keys() -> (Option<String>, Option<String>) {
     let env_pub = std::env::var("SMOOTH_VAPID_PUBLIC").ok().filter(|s| !s.is_empty());
     let env_priv = std::env::var("SMOOTH_VAPID_PRIVATE").ok().filter(|s| !s.is_empty());
     if let (Some(pub_k), Some(priv_k)) = (env_pub, env_priv) {
         return (Some(pub_k), Some(priv_k));
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let (pub_k, priv_k) = load_or_generate_vapid_at(&vapid_path());
-        (Some(pub_k), Some(priv_k))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        (None, None)
-    }
+    let (pub_k, priv_k) = load_or_generate_vapid_at(&vapid_path());
+    (Some(pub_k), Some(priv_k))
 }
 
 /// Load the persisted VAPID keypair, generating + persisting one on first run.
 /// Path-injectable so tests don't touch `~/.smooth`.
-#[cfg(not(target_os = "windows"))]
 fn load_or_generate_vapid_at(path: &std::path::Path) -> (String, String) {
     if let Ok(bytes) = std::fs::read(path) {
         if let Ok(v) = serde_json::from_slice::<VapidFile>(&bytes) {
@@ -237,9 +248,8 @@ fn load_or_generate_vapid_at(path: &std::path::Path) -> (String, String) {
 }
 
 /// Generate a P-256 VAPID keypair as (public, private) raw base64url — the format
-/// `VapidSignatureBuilder::from_base64` reads and the browser's
+/// [`vapid_key_pair`] reads and the browser's
 /// `applicationServerKey` expects (65-byte uncompressed point / 32-byte scalar).
-#[cfg(not(target_os = "windows"))]
 fn generate_vapid_keys() -> (String, String) {
     use base64::Engine as _;
     use p256::elliptic_curve::sec1::ToEncodedPoint as _;
@@ -293,13 +303,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_resolves_to_no_keys() {
-        // `configured == false` (the Windows path) never provisions — push stays off.
-        assert_eq!(resolve_vapid_keys(false), (None, None));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
     fn generated_keys_are_valid_vapid() {
         use base64::Engine as _;
         let (pub_k, priv_k) = generate_vapid_keys();
@@ -310,13 +313,113 @@ mod tests {
         assert_eq!(pub_bytes.len(), 65);
         assert_eq!(pub_bytes[0], 0x04, "uncompressed point marker");
         assert_eq!(priv_bytes.len(), 32);
-        // web-push must accept our private key in its VAPID builder (p256dh reuses
-        // the generated public point — a valid uncompressed key; auth is 16 bytes).
-        let info = SubscriptionInfo::new("https://example.com/x", &pub_k, "MDEyMzQ1Njc4OWFiY2RlZg");
-        assert!(VapidSignatureBuilder::from_base64(&priv_k, &info).is_ok(), "web-push accepts the generated key");
+        // The signer must accept our private key, and derive the same public point.
+        let kp = vapid_key_pair(&priv_k).expect("generated private key parses");
+        let derived = web_push_native::p256::PublicKey::from_sec1_bytes(&kp.public_key().to_bytes()).unwrap();
+        let advertised = web_push_native::p256::PublicKey::from_sec1_bytes(&pub_bytes).unwrap();
+        assert_eq!(derived, advertised, "keypair matches advertised public key");
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn vapid_key_pair_rejects_garbage() {
+        assert!(vapid_key_pair("not base64!").is_err());
+        assert!(vapid_key_pair("AAAA").is_err(), "wrong length");
+    }
+
+    /// A browser-side keypair + auth secret, as `pushManager.subscribe` makes.
+    fn ua_subscription(endpoint: &str) -> (Subscription, web_push_native::p256::SecretKey, [u8; 16]) {
+        use base64::Engine as _;
+        use web_push_native::p256::elliptic_curve::sec1::ToEncodedPoint as _;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let ua_secret = web_push_native::p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let auth: [u8; 16] = rand::random();
+        let sub = Subscription {
+            endpoint: endpoint.into(),
+            keys: SubscriptionKeys {
+                p256dh: b64.encode(ua_secret.public_key().to_encoded_point(false).as_bytes()),
+                auth: b64.encode(auth),
+            },
+        };
+        (sub, ua_secret, auth)
+    }
+
+    #[test]
+    fn push_request_round_trips_through_browser_decryption() {
+        let (_, priv_k) = generate_vapid_keys();
+        let kp = vapid_key_pair(&priv_k).unwrap();
+        let (sub, ua_secret, auth) = ua_subscription("https://push.example.com/send/abc");
+        let req = build_push_request(&sub, &kp, br#"{"title":"hi"}"#).expect("request builds");
+
+        assert_eq!(req.method(), axum::http::Method::POST);
+        assert_eq!(req.uri(), "https://push.example.com/send/abc");
+        assert_eq!(req.headers()["content-encoding"], "aes128gcm");
+        assert!(req.headers().contains_key("ttl"));
+        let authz = req.headers()["authorization"].to_str().unwrap();
+        assert!(authz.starts_with("vapid t="), "RFC 8292 vapid scheme: {authz}");
+        assert!(authz.contains(", k="), "carries the VAPID public key: {authz}");
+
+        // The device (holding ua_secret + auth) can decrypt exactly our payload.
+        let plain = web_push_native::decrypt(req.into_body(), &ua_secret, &Auth::clone_from_slice(&auth)).expect("decrypts");
+        assert_eq!(plain, br#"{"title":"hi"}"#);
+    }
+
+    #[test]
+    fn push_request_rejects_bad_subscription_keys() {
+        let (_, priv_k) = generate_vapid_keys();
+        let kp = vapid_key_pair(&priv_k).unwrap();
+        let (mut sub, _, _) = ua_subscription("https://push.example.com/x");
+        sub.keys.auth = "c2hvcnQ".into(); // 5 bytes, not 16
+        assert!(build_push_request(&sub, &kp, b"x").is_err());
+        let (mut sub, _, _) = ua_subscription("https://push.example.com/x");
+        sub.keys.p256dh = "AAAA".into();
+        assert!(build_push_request(&sub, &kp, b"x").is_err());
+        let (mut sub, _, _) = ua_subscription("not a uri with spaces");
+        sub.endpoint = "not a uri with spaces".into();
+        assert!(build_push_request(&sub, &kp, b"x").is_err());
+    }
+
+    #[test]
+    fn expired_statuses_prune() {
+        assert!(is_expired_status(StatusCode::GONE));
+        assert!(is_expired_status(StatusCode::NOT_FOUND));
+        assert!(!is_expired_status(StatusCode::CREATED));
+        assert!(!is_expired_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_expired_status(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[tokio::test]
+    async fn send_to_all_posts_and_prunes_gone_subscriptions() {
+        use axum::extract::Path;
+        let app = Router::new().route(
+            "/push/{id}",
+            post(|Path(id): Path<String>| async move {
+                if id == "gone" {
+                    StatusCode::GONE
+                } else {
+                    StatusCode::CREATED
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (pub_k, priv_k) = generate_vapid_keys();
+        let state = PushState {
+            public_key: Some(pub_k),
+            private_key: Some(priv_k),
+            subs_path: dir.path().join("subs.json"),
+            lock: Arc::new(Mutex::new(())),
+        };
+        let (live, _, _) = ua_subscription(&format!("http://{addr}/push/live"));
+        let (gone, _, _) = ua_subscription(&format!("http://{addr}/push/gone"));
+        state.save_subs(&[live.clone(), gone]).await;
+
+        assert_eq!(state.send_to_all("t", "b").await, 1, "only the live endpoint accepted");
+        assert_eq!(state.load_subs(), vec![live], "the 410 subscription was pruned");
+    }
+
     #[test]
     fn load_or_generate_is_stable() {
         let dir = std::env::temp_dir().join(format!("vapid-test-{}", std::process::id()));

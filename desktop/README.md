@@ -143,9 +143,10 @@ up 2h · 1 restart`, `Daemon crashed — restarting in 4s (attempt 2/8)`
   link, and it removes its own link (one into an app bundle) so PATH falls
   through to brew's. It does this even when the bundled `th` is newer; in that
   case it logs `th: hint: … run: brew upgrade smooai/tools/th` instead of
-  shadowing brew. The daemon it spawns gets `SMOOTH_TH_BIN=<brew th>`, so the
-  daemon's own `th` calls use brew's too, unless you set `SMOOTH_TH_BIN`
-  yourself.
+  shadowing brew. The daemon it spawns gets `SMOOTH_TH_BIN` set to the
+  NEWEST of brew's `th` and the bundled one (brew on a tie), so the daemon's
+  own `th` calls never run an older brew keg than the app ships
+  (SMOODEV-4114), unless you set `SMOOTH_TH_BIN` yourself.
 
     **With no brew `th`**, it links the bundled one. It only ever repoints a link
     of its own (into an app bundle, or dangling), and never to an older `th` than
