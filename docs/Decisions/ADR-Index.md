@@ -33,6 +33,7 @@ Write one when a decision:
 | [[ADR-010-centralized-agent-mail]]                       | Agent mail moves from per-repo Dolt to a machine-level SQLite store                                     | Accepted              | 2026-08 |
 | [[ADR-011-smoothflow-engine-owned-ptys]]                 | SmoothFlow drops tmux: engine-owned PTYs with a headless libghostty-vt per session                      | Accepted              | 2026-10 |
 | [[ADR-012-daemon-ownership-and-capabilities]]            | Daemon ownership and CLI↔daemon compatibility (app owns the daemon; capability handshake)               | Accepted              | 2026-10 |
+| [[ADR-013-one-conversation-stream]]                      | One conversation stream: persisted event log broadcast to every device, resume from seq                 | Proposed              | 2026-10 |
 
 > [!todo] More to backfill
 > Older decisions worth ADRing once we have time: Dolt over SQLite for pearls (2025; reversed by th-d3e842), microsandbox over Firecracker (2025), single Rust binary over multi-binary CLI (2024), pearls naming over beads/issues (2025), workflow phases as the default agent loop (2026), gRPC + UDS for in-VM cast comms (2026; see `single_process.rs`).
