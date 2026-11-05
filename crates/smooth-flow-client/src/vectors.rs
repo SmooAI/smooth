@@ -75,22 +75,27 @@ fn close_vectors() -> Value {
 /// `title.json`: tab titles.
 fn title_vectors() -> Value {
     let mut cases = Vec::new();
-    for (name, t, pearl, worktree, project) in [
-        ("the pearl wins", "fix the parser", Some("th-1"), "/w/x", ""),
-        ("a blank pearl is none", "fix the parser", Some("  "), "/w/x", ""),
-        ("a path title becomes its folder", "~/dev/smooai/smooai", None, "", ""),
-        ("the root stays the root", "/", None, "", ""),
-        ("no title: the worktree's folder", "", None, "/Users/me/dev/x/", ""),
-        ("home is ~", "", None, "/Users/me", ""),
-        ("no worktree: the project's folder", "", None, "", "/w/smooai"),
-        ("nothing at all: the kind", "", None, "", ""),
+    for (name, kind, pinned, t, pearl, worktree, project) in [
+        ("the pearl wins", "claude", false, "fix the parser", Some("th-1"), "/w/x", ""),
+        ("a given name beats the pearl", "claude", true, "deploys", Some("th-1"), "/w/x", ""),
+        ("a blank given name is no name", "claude", true, " ", Some("th-1"), "/w/x", ""),
+        ("a shell's live name beats the pearl", "shell", false, "cargo", Some("th-1"), "/w/x", ""),
+        ("a shell at home is ~", "shell", false, "~", None, "/Users/me", ""),
+        ("a blank pearl is none", "claude", false, "fix the parser", Some("  "), "/w/x", ""),
+        ("a path title becomes its folder", "claude", false, "~/dev/smooai/smooai", None, "", ""),
+        ("the root stays the root", "claude", false, "/", None, "", ""),
+        ("no title: the worktree's folder", "claude", false, "", None, "/Users/me/dev/x/", ""),
+        ("home is ~", "claude", false, "", None, "/Users/me", ""),
+        ("no worktree: the project's folder", "claude", false, "", None, "", "/w/smooai"),
+        ("nothing at all: the kind", "claude", false, "", None, "", ""),
     ] {
         let s = Session {
             title: t.into(),
+            title_pinned: pinned,
             pearl_id: pearl.map(Into::into),
             worktree: worktree.into(),
             project: project.into(),
-            ..session("fs-1", "claude", SessionState::Idle)
+            ..session("fs-1", kind, SessionState::Idle)
         };
         cases.push(case(
             name,

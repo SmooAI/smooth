@@ -26,15 +26,24 @@ pub fn folder_name(path: &str, home: &str) -> Option<String> {
     Some(trimmed.rsplit('/').next().unwrap_or(trimmed).to_string())
 }
 
-/// The tab title: the pearl id, else a title that isn't just a path, else the
-/// folder name (of the path title, or of the worktree, or the project), else
-/// the kind. Never a whole path.
+/// The tab title. Never a whole path.
+///
+/// A name someone gave it (`title_pinned`); else, for an agent, the pearl id
+/// (a shell's name is live — the program in it or its directory — so a pearl
+/// never replaces it); else a title that isn't just a path, else the folder
+/// name (of the path title, or of the worktree, or the project), else the
+/// kind.
 #[must_use]
 pub fn tab_title(s: &Session, home: &str) -> String {
-    if let Some(p) = s.pearl_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        return p.to_string();
-    }
     let t = s.title.trim();
+    if s.title_pinned && !t.is_empty() {
+        return t.to_string();
+    }
+    if s.kind != "shell" {
+        if let Some(p) = s.pearl_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            return p.to_string();
+        }
+    }
     if !t.is_empty() && !looks_like_path(t) {
         return t.to_string();
     }
@@ -71,5 +80,24 @@ mod tests {
         assert_eq!(tab_title(&s("", None, "/Users/me/dev/x/"), "/Users/me"), "x");
         assert_eq!(tab_title(&s("", None, "/Users/me"), "/Users/me"), "~");
         assert_eq!(tab_title(&s("", None, ""), "/Users/me"), "claude", "nothing else: the kind");
+    }
+
+    #[test]
+    fn a_given_name_wins_and_a_shell_keeps_its_live_name() {
+        let pinned = Session {
+            title_pinned: true,
+            ..s("deploys", Some("th-1"), "/w/x")
+        };
+        assert_eq!(tab_title(&pinned, "/Users/me"), "deploys");
+        let blank = Session {
+            title_pinned: true,
+            ..s("  ", Some("th-1"), "/w/x")
+        };
+        assert_eq!(tab_title(&blank, "/Users/me"), "th-1", "a blank pinned name is no name");
+        let shell = Session {
+            kind: "shell".into(),
+            ..s("cargo", Some("th-1"), "/w/x")
+        };
+        assert_eq!(tab_title(&shell, "/Users/me"), "cargo");
     }
 }

@@ -26,6 +26,14 @@ enum ShellLaunch {
         return n
     }
 
+    /// SMOODEV-4127: the `flow.prewarm` hint for where the next ⌘N would
+    /// open — the same answer `request` gives, sent ahead of time.
+    static func prewarm(source: Session?, last: String?, home: String,
+                        isDirectory: (String) -> Bool = ShellLaunch.isDirectory) -> ClientFrame {
+        let n = request(source: source, last: last, home: home, isDirectory: isDirectory)
+        return .prewarm(worktree: n.worktree, cwdOf: n.cwdOf)
+    }
+
     static func isDirectory(_ path: String) -> Bool {
         var dir: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue

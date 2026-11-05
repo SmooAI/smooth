@@ -494,12 +494,38 @@ any app chord that still reaches it back to the app
 | ⌘⌥1/2/3/4             | terminal / diff / PR / activity tab                            |
 | ⌘T                    | new tab (a second view of the focused session)                 |
 | ⌘W / ⌘⇧W              | close pane (tab, then window, collapse when empty) / close tab |
+| ⌘⇧R                   | rename the tab (empty goes back to the automatic name)         |
 | ⌘⇧[ / ⌘⇧]             | previous / next tab                                            |
 | ⌘⇧→ / ⌘⇧← / ⌘⇧↑ / ⌘⇧↓ | split right / left / up / down, with a new shell at the cwd    |
 | ⌘D / ⌘⇧D              | aliases of split right / split down                            |
 | ⌘⌥←↑→↓                | move focus between panes                                       |
 | ⌘⇧↩ / ⌘⌥=             | zoom pane / equalize panes                                     |
 | ⌘⌃S / ⌘⌃P             | toggle sidebar / pearl rail                                    |
+
+**Tab names** (SMOODEV-4127). Tab names work like cmux's:
+
+- **Shell tabs** are named live by the engine: by the program running in
+  them, else by their folder.
+- **Agent tabs** keep their pearl id or title.
+- **Renaming.** ⌘⇧R (Tabs ▸ Rename Tab…) opens a small field over the tab, or
+  over the pane header when the tab strip is hidden. Return renames, Esc
+  cancels, and an empty name goes back to the automatic one.
+- **Where the name lives.** It is stored on the session row (`flow.rename`,
+  `title_pinned`), so the phones and `th flow ls` show it too. A name you gave
+  is never replaced automatically.
+
+The rules for picking a tab's title are §5 of the
+[client spec](SmoothFlow-Client-Spec.md). The engine side is described in
+[SmoothFlow.md § Shell names](SmoothFlow.md#shell-names).
+
+**Fast ⌘N** (SMOODEV-4127). The app sends `flow.prewarm` for the directory
+where the next ⌘N would open. It does this on connect, on focus change, and
+when the focused terminal reports a new directory. The engine keeps a shell
+waiting at a prompt there, so ⌘N shows a prompt in about 50–90 ms instead of
+about 0.7 s. To read each stage of a real ⌘N in Console, run
+`log stream --predicate 'subsystem == "ai.smoo.smoothflow" AND category == "latency"'`.
+It shows the engine's answer, the surface being created and attached, and
+the first output on screen.
 
 ![fan-out](assets/smoothflow/fanout.png)
 

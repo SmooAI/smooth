@@ -47,4 +47,18 @@ final class ShellLaunchTests: XCTestCase {
         LastDirectory.remember(nil, d)
         XCTAssertEqual(LastDirectory.load(d), "/Users/me/dev/x")
     }
+
+    /// SMOODEV-4127: the prewarm hint is the directory ⌘N would open in.
+    func testPrewarmHintFollowsTheNextShellsDirectory() {
+        XCTAssertEqual(ShellLaunch.prewarm(source: s("fs-1"), last: "/last", home: home) { _ in true }, .prewarm(worktree: nil, cwdOf: "fs-1"))
+        XCTAssertEqual(ShellLaunch.prewarm(source: nil, last: "/last", home: home) { _ in true }, .prewarm(worktree: "/last", cwdOf: nil))
+        XCTAssertEqual(ShellLaunch.prewarm(source: nil, last: nil, home: home), .prewarm(worktree: home, cwdOf: nil))
+    }
+
+    /// SMOODEV-4127: ⌘⇧R's field — blank resets, anything else is trimmed.
+    func testRenameFieldBlankResets() {
+        XCTAssertEqual(TabRename.requested("  build box \n"), "build box")
+        XCTAssertNil(TabRename.requested("   "))
+        XCTAssertNil(TabRename.requested(""))
+    }
 }

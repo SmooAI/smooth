@@ -197,6 +197,14 @@ the surface's `keyDown`, and `keyDown` hands back any app chord that reaches it.
 terminal, so it does here; ⌘⇧W keeps its place as the bigger hammer. There is no
 `closeSplit` action any more — ⌘W is it.
 
+**⌘⇧R renames the tab** (SMOODEV-4127, cmux's chord). It is free in
+Ghostty's defaults, and ⌘⌥R stays Kill & Resume. It names the focused pane's
+session, because that session is what the tab shows. A small popover opens
+over the tab, or over the pane header when the strip is hidden: Return
+renames, Esc cancels, and an empty name goes back to the automatic one. The
+name is stored on the row (`flow.rename`) and is pinned, so a shell's live
+name stops replacing it. `renameTab` is the row in the file.
+
 ## Tests
 
 - `Tests/PaneCloseTests.swift` — the ⌘W decision: what is asked and what is
@@ -213,6 +221,8 @@ terminal, so it does here; ⌘⇧W keeps its place as the bigger hammer. There i
 - `Tests/ShellLaunchTests.swift` — where ⌘N / a split / New Shell in
   Directory… open a shell (picked, else `cwd_of` the focused session, else the
   last directory, else `$HOME`), and that `cwd_of` stays off the wire unset.
+  Also checks that the `flow.prewarm` hint names the same directory, and that
+  a blank rename resets the name.
 - `UITests/LayoutUITests.swift` — the real app against the mock fleet: ⌘⇧
   arrows split with a new shell, ⌘N opens a shell tab with no sheet, ⌘D/⌘⇧D
   split, ⌘W asks before closing a live agent's pane (Cancel leaves it alone),

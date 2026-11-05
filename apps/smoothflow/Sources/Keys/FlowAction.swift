@@ -25,6 +25,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case newTab
     case closePane
     case closeTab
+    case renameTab
     case previousTab
     case nextTab
 
@@ -114,7 +115,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
              .focusSession1, .focusSession2, .focusSession3, .focusSession4, .focusSession5,
              .focusSession6, .focusSession7, .focusSession8, .focusSession9:
             .session
-        case .newTab, .closePane, .closeTab, .previousTab, .nextTab:
+        case .newTab, .closePane, .closeTab, .renameTab, .previousTab, .nextTab:
             .tabs
         case .splitRight, .splitDown, .splitLeft, .splitUp, .splitRightAlias, .splitDownAlias,
              .focusPaneLeft, .focusPaneRight, .focusPaneUp, .focusPaneDown,
@@ -146,6 +147,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .newTab: return "New Tab"
         case .closePane: return "Close Pane"
         case .closeTab: return "Close Tab"
+        case .renameTab: return "Rename Tab…"
         case .previousTab: return "Previous Tab"
         case .nextTab: return "Next Tab"
         case .splitRight: return "Split Right"
@@ -234,6 +236,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .newTab: return KeyChord("t", command: true)
         case .closePane: return KeyChord("w", command: true)
         case .closeTab: return KeyChord("w", command: true, shift: true)
+        case .renameTab: return KeyChord("r", command: true, shift: true)
         case .previousTab: return KeyChord("[", command: true, shift: true)
         case .nextTab: return KeyChord("]", command: true, shift: true)
 
@@ -289,6 +292,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .newTab: return "Another surface layout over the same fleet — tabs hold panes, not sessions."
         case .closePane: return "Closes the focused pane; the tab collapses when it empties, and the last pane just empties — the window stays. Asks first when a live session is on screen."
         case .closeTab: return "Closes the whole tab, splits and all."
+        case .renameTab: return "Names the focused pane's session (cmux's ⌘⇧R). Esc cancels; an empty name goes back to the automatic one — a shell's running program or folder."
         case .closeOut: return "Ends the session for good: closes its pearl, removes the merged worktree and branch, drops the row. A running session is killed first."
         case .steerAll: return "Sends the steer bar's text to every working session."
         case .zoomPane: return "The focused pane fills the tab; again restores the layout."

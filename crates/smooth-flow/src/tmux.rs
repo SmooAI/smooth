@@ -543,6 +543,52 @@ pub fn kill_session(socket: &str, session: &str) {
     let _ = tmux(socket, &["kill-session", "-t", session]);
 }
 
+/// Rename session `from` to `to` (SMOODEV-4127: claiming a pre-warmed shell).
+///
+/// # Errors
+/// When the session is gone, `to` is taken, or tmux fails.
+pub fn rename_session(socket: &str, from: &str, to: &str) -> Result<()> {
+    tmux_ok(socket, &["rename-session", "-t", from, to]).map(|_| ())
+}
+
+/// Every session name on the server (none when it is not running).
+#[must_use]
+pub fn list_sessions(socket: &str) -> Vec<String> {
+    tmux_ok(socket, &["list-sessions", "-F", "#{session_name}"])
+        .map(|out| out.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// What names a shell tab (SMOODEV-4127), in one read: the foreground
+/// command, the host names (tmux's default title), the cwd and the title.
+/// Not tab-separated: tmux under a C locale prints a tab as `_` (th-8e3087).
+const FACTS_FORMAT: &str = "#{pane_current_command}|:|#{host}|:|#{host_short}|:|#{pane_current_path}|:|#{pane_title}";
+const FACTS_SEP: &str = "|:|";
+
+/// [`FACTS_FORMAT`] for `session`'s pane.
+///
+/// # Errors
+/// When the session is gone or tmux fails.
+pub fn pane_facts(socket: &str, session: &str) -> Result<crate::autotitle::PaneFacts> {
+    Ok(parse_pane_facts(&tmux_ok(socket, &["display-message", "-p", "-t", session, FACTS_FORMAT])?))
+}
+
+/// Parse a [`FACTS_FORMAT`] read. The title is last, so a separator inside
+/// it stays in it.
+#[must_use]
+pub fn parse_pane_facts(raw: &str) -> crate::autotitle::PaneFacts {
+    let line = raw.trim_end_matches(['\n', '\r']);
+    let mut f = line.splitn(5, FACTS_SEP);
+    let mut next = || f.next().unwrap_or_default().to_string();
+    let (command, host, short, path, title) = (next(), next(), next(), next(), next());
+    crate::autotitle::PaneFacts {
+        command,
+        path: path.starts_with('/').then_some(path),
+        title,
+        hosts: [host, short].into_iter().filter(|h| !h.is_empty()).collect(),
+    }
+}
+
 /// Kill the whole flow server (tests / `th flow` never call this).
 pub fn kill_server(socket: &str) {
     let _ = tmux(socket, &["kill-server"]);
@@ -627,6 +673,38 @@ mod tests {
             }
         );
         assert_eq!(parse_pane_meta(""), PaneMeta::default());
+    }
+
+    #[test]
+    fn pane_facts_parse_with_the_title_last() {
+        let f = parse_pane_facts("zsh|:|mac.local|:|mac|:|/Users/me/dev|:|me@mac: ~/dev |:| odd\n");
+        assert_eq!(f.command, "zsh");
+        assert_eq!(f.hosts, vec!["mac.local", "mac"]);
+        assert_eq!(f.path.as_deref(), Some("/Users/me/dev"));
+        assert_eq!(f.title, "me@mac: ~/dev |:| odd", "a separator in the title stays in it");
+        let empty = parse_pane_facts("");
+        assert_eq!(empty, crate::autotitle::PaneFacts::default());
+        assert!(parse_pane_facts("zsh|:|h|:|h|:||:|t").path.is_none(), "no cwd read");
+    }
+
+    /// The real tmux: a claimed spare is renamed, listed, and read.
+    #[test]
+    fn rename_list_and_facts_against_tmux() {
+        if !tmux_available() {
+            return;
+        }
+        let socket = format!("flow-test-{}", uuid::Uuid::new_v4().simple());
+        let dir = tempfile::tempdir().unwrap();
+        launch(&socket, "flowspare-a", dir.path(), &["sh".into()]).unwrap();
+        assert!(list_sessions(&socket).contains(&"flowspare-a".to_string()));
+        rename_session(&socket, "flowspare-a", "fs-a").unwrap();
+        assert_eq!(list_sessions(&socket), vec!["fs-a"]);
+        assert!(rename_session(&socket, "flowspare-a", "fs-b").is_err(), "gone after the rename");
+        let f = pane_facts(&socket, "fs-a").unwrap();
+        assert!(crate::autotitle::is_shell(&f.command), "{f:?}");
+        assert!(!f.hosts.is_empty(), "{f:?}");
+        kill_server(&socket);
+        assert!(list_sessions(&socket).is_empty(), "no server ⇒ no sessions");
     }
 
     #[test]

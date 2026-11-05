@@ -129,6 +129,17 @@ final class KeymapTests: XCTestCase {
         XCTAssertEqual(Keymap.default.appAction(for: KeyChord("n", command: true)), .newShell)
     }
 
+    /// SMOODEV-4127: ⌘⇧R renames the tab (cmux's chord), a Tabs action, and
+    /// ⌘⌥R stays Kill & Resume.
+    func testCommandShiftRRenamesTheTab() {
+        XCTAssertEqual(Keymap.default.chord(for: .renameTab), KeyChord("r", command: true, shift: true))
+        XCTAssertEqual(Keymap.default.appAction(for: KeyChord("r", command: true, shift: true)), .renameTab)
+        XCTAssertEqual(Keymap.default.appAction(for: KeyChord("r", command: true, option: true)), .killResume)
+        XCTAssertEqual(FlowAction.renameTab.category, .tabs)
+        let moved = Keymap.parse("[keys]\nrenameTab = \"cmd+opt+e\"\n")
+        XCTAssertEqual(moved.appAction(for: KeyChord("e", command: true, option: true)), .renameTab, "rebindable in keybindings.toml")
+    }
+
     /// ⌘⇧ + each arrow splits that way; ⌘D / ⌘⇧D stay as Right / Down aliases.
     func testCommandShiftArrowsSplitAllFourWays() {
         let map = Keymap.default

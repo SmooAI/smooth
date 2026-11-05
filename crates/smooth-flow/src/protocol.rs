@@ -160,6 +160,25 @@ pub enum ClientFrame {
     /// `flow.error` code `blocked` when the agent can't take a prompt.
     #[serde(rename = "flow.diff.review")]
     DiffReview { id: String, base: DiffBase, comments: Vec<ReviewComment> },
+    /// Additive (SMOODEV-4127): name a session. The name is pinned — a
+    /// shell's live name no longer replaces it. A missing or blank `title`
+    /// goes back to the automatic name. Reply is `flow.session`.
+    #[serde(rename = "flow.rename")]
+    Rename {
+        id: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    /// Additive (SMOODEV-4127): a new shell is likely soon — in `worktree`,
+    /// else where session `cwd_of` is now, else the default project — so
+    /// keep one ready there. Fire and forget: no reply.
+    #[serde(rename = "flow.prewarm")]
+    Prewarm {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd_of: Option<String>,
+    },
 }
 
 const fn uncommitted() -> DiffBase {
@@ -691,6 +710,7 @@ mod tests {
             unread: false,
             adopted: false,
             host: crate::host::HostKind::Tmux,
+            title_pinned: false,
         }
     }
 
@@ -769,6 +789,15 @@ mod tests {
                 winner_session_id: "fs-1".into(),
             },
             ClientFrame::MarkRead { id: "a".into() },
+            ClientFrame::Rename {
+                id: "a".into(),
+                title: Some("build box".into()),
+            },
+            ClientFrame::Rename { id: "a".into(), title: None },
+            ClientFrame::Prewarm {
+                worktree: None,
+                cwd_of: Some("fs-1".into()),
+            },
         ];
         for f in frames {
             let mut v = serde_json::to_value(&f).unwrap();
@@ -998,6 +1027,16 @@ mod tests {
         assert!(parse_client_frame("not json").is_err());
         assert_eq!(client_seq(r#"{"seq":7,"type":"flow.snapshot"}"#), Some(json!(7)));
         assert_eq!(client_seq(r#"{"type":"flow.snapshot"}"#), None);
+    }
+
+    /// SMOODEV-4127: an empty rename resets; a bare prewarm parses.
+    #[test]
+    fn rename_and_prewarm_fields_are_optional() {
+        let f = parse_client_frame(r#"{"type":"flow.rename","id":"x"}"#).unwrap().unwrap();
+        assert_eq!(f, ClientFrame::Rename { id: "x".into(), title: None });
+        let f = parse_client_frame(r#"{"type":"flow.prewarm"}"#).unwrap().unwrap();
+        assert_eq!(f, ClientFrame::Prewarm { worktree: None, cwd_of: None });
+        assert_eq!(serde_json::to_value(&f).unwrap(), json!({"type": "flow.prewarm"}));
     }
 
     #[test]

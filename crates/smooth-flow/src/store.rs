@@ -271,6 +271,12 @@ pub struct Session {
     /// answers terminal queries itself (Client Spec §10).
     #[serde(default)]
     pub host: HostKind,
+    /// SMOODEV-4127: `title` is a name someone gave the session (⌘⇧R in
+    /// SmoothFlow, `flow.rename`), so nothing automatic may overwrite it: not
+    /// a shell's live name, not inference. A client shows a pinned title
+    /// ahead of the pearl id. Off the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_pinned: bool,
 }
 
 /// A fan-out: N candidate sessions racing one prompt.
@@ -513,6 +519,17 @@ impl FlowStore {
         if !has_host {
             conn.execute("ALTER TABLE sessions ADD COLUMN host TEXT", []).context("add host")?;
         }
+        // SMOODEV-4127: a user-given name pins the title; `auto_title` keeps
+        // the name it replaced, for when the rename is cleared.
+        let has_pinned = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'title_pinned'")?
+            .exists([])
+            .context("probe title_pinned column")?;
+        if !has_pinned {
+            conn.execute("ALTER TABLE sessions ADD COLUMN title_pinned INTEGER NOT NULL DEFAULT 0", [])
+                .context("add title_pinned")?;
+            conn.execute("ALTER TABLE sessions ADD COLUMN auto_title TEXT", []).context("add auto_title")?;
+        }
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
             .context("index hook_token_hash")?;
         Ok(Self { conn })
@@ -596,6 +613,7 @@ impl FlowStore {
             unread: row.get::<_, i64>("unread")? != 0,
             adopted: row.get::<_, i64>("adopted")? != 0,
             host: row.get::<_, Option<String>>("host")?.as_deref().and_then(HostKind::parse).unwrap_or_default(),
+            title_pinned: row.get::<_, i64>("title_pinned")? != 0,
         })
     }
 
@@ -605,8 +623,17 @@ impl FlowStore {
     /// On a database failure.
     #[allow(clippy::needless_pass_by_value)]
     pub fn create(&self, new: NewSession) -> Result<Session> {
+        self.create_with_id(&new_session_id(), new)
+    }
+
+    /// [`Self::create`] under an id minted earlier — a pre-warmed shell's
+    /// (SMOODEV-4127), whose exit wrapper was launched knowing it.
+    ///
+    /// # Errors
+    /// On a database failure (including an id already in use).
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn create_with_id(&self, id: &str, new: NewSession) -> Result<Session> {
         let now = Utc::now();
-        let id = new_session_id();
         let kind = new.kind.unwrap_or(SessionKind::Shell);
         self.conn
             .execute(
@@ -633,7 +660,7 @@ impl FlowStore {
                 ],
             )
             .context("insert session")?;
-        self.get(&id)?.context("session vanished after insert")
+        self.get(id)?.context("session vanished after insert")
     }
 
     /// One session by id.
@@ -795,6 +822,48 @@ impl FlowStore {
             )
             .context("set meta")?;
         Ok(())
+    }
+
+    /// Name the session (SMOODEV-4127): `Some` pins `title` to it, keeping
+    /// the name it replaced; `None` (or a blank name) unpins and puts that
+    /// name back. Returns whether a row changed.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn rename(&self, id: &str, title: Option<&str>) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let n = match title.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => self.conn.execute(
+                "UPDATE sessions SET auto_title = CASE WHEN title_pinned = 0 THEN title ELSE auto_title END,
+                                     title = ?2, title_pinned = 1, updated_at = ?3
+                 WHERE id = ?1",
+                params![id, t, now],
+            ),
+            None => self.conn.execute(
+                "UPDATE sessions SET title = CASE WHEN title_pinned = 1 THEN COALESCE(auto_title, title) ELSE title END,
+                                     auto_title = NULL, title_pinned = 0, updated_at = ?2
+                 WHERE id = ?1",
+                params![id, now],
+            ),
+        }
+        .context("rename session")?;
+        Ok(n > 0)
+    }
+
+    /// A live, automatic name (a shell's, SMOODEV-4127). Never touches a
+    /// pinned title; returns whether the title changed.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_auto_title(&self, id: &str, title: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE sessions SET title = ?2, updated_at = ?3 WHERE id = ?1 AND title_pinned = 0 AND title != ?2",
+                params![id, title, Utc::now().to_rfc3339()],
+            )
+            .context("set auto title")?;
+        Ok(n > 0)
     }
 
     /// Delete a session row.
@@ -1376,6 +1445,58 @@ mod tests {
         // COALESCE keeps existing values on None.
         st.set_meta(&s.id, None, None, None).unwrap();
         assert_eq!(st.get(&s.id).unwrap().unwrap().title, "renamed");
+    }
+
+    #[test]
+    fn rename_pins_and_clearing_restores_the_automatic_name() {
+        let st = store();
+        let mut n = new_shell();
+        n.title = "smooth".into();
+        let s = st.create(n).unwrap();
+        assert!(!s.title_pinned);
+        assert!(st.rename(&s.id, Some("  build box  ")).unwrap());
+        let r = st.get(&s.id).unwrap().unwrap();
+        assert_eq!((r.title.as_str(), r.title_pinned), ("build box", true), "trimmed and pinned");
+        // A second rename keeps the ORIGINAL automatic name to go back to.
+        st.rename(&s.id, Some("deploys")).unwrap();
+        assert!(!st.set_auto_title(&s.id, "cargo").unwrap(), "a pinned title is never overwritten");
+        assert_eq!(st.get(&s.id).unwrap().unwrap().title, "deploys");
+        // Clearing (None or blank) unpins and restores.
+        st.rename(&s.id, Some("   ")).unwrap();
+        let r = st.get(&s.id).unwrap().unwrap();
+        assert_eq!((r.title.as_str(), r.title_pinned), ("smooth", false));
+        // Clearing an unpinned row changes nothing but the flag.
+        st.rename(&s.id, None).unwrap();
+        assert_eq!(st.get(&s.id).unwrap().unwrap().title, "smooth");
+        assert!(!st.rename("fs-nope", Some("x")).unwrap(), "no such row");
+    }
+
+    #[test]
+    fn auto_title_reports_only_a_real_change() {
+        let st = store();
+        let s = st.create(new_shell()).unwrap();
+        assert!(st.set_auto_title(&s.id, "smooth").unwrap());
+        assert!(!st.set_auto_title(&s.id, "smooth").unwrap(), "same name ⇒ no write, no broadcast");
+        assert!(st.set_auto_title(&s.id, "vim").unwrap());
+        assert_eq!(st.get(&s.id).unwrap().unwrap().title, "vim");
+    }
+
+    #[test]
+    fn create_with_id_uses_the_given_id() {
+        let st = store();
+        let s = st.create_with_id("fs-0000abcd", new_shell()).unwrap();
+        assert_eq!(s.id, "fs-0000abcd");
+        assert!(st.create_with_id("fs-0000abcd", new_shell()).is_err(), "ids stay unique");
+    }
+
+    #[test]
+    fn title_pinned_is_off_the_wire_until_set() {
+        let st = store();
+        let s = st.create(new_shell()).unwrap();
+        assert!(serde_json::to_value(&s).unwrap().get("title_pinned").is_none());
+        st.rename(&s.id, Some("x")).unwrap();
+        let v = serde_json::to_value(st.get(&s.id).unwrap().unwrap()).unwrap();
+        assert_eq!(v["title_pinned"], serde_json::json!(true));
     }
 
     #[test]

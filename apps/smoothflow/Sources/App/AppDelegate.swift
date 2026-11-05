@@ -271,6 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .newShell: app.newShell()
         case .closePane: center?.closeFocusedPane()
         case .closeTab: center?.closeTab()
+        case .renameTab: center?.renameTab()
         case .previousTab: center?.cycleTab(by: -1)
         case .nextTab: center?.cycleTab(by: 1)
         case .splitRight, .splitRightAlias: center?.split(.right)

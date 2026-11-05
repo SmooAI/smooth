@@ -319,7 +319,9 @@ Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, (v0.1)
 `flow.hello`, `flow.handoff`, (th-e126cc) `flow.close`, and (th-26f5b9)
 `flow.diff`, `flow.diff.revert`, `flow.diff.stage`, `flow.diff.unstage`,
-`flow.diff.review` — see [SmoothFlow-Diff.md](SmoothFlow-Diff.md).
+`flow.diff.review` — see [SmoothFlow-Diff.md](SmoothFlow-Diff.md) — and
+(SMOODEV-4127) `flow.rename` and `flow.prewarm`, see
+[Shell names and pre-warmed shells](#shell-names).
 
 Field-level shapes are the types in `crates/smooth-flow/src/protocol.rs`
 (`ClientFrame`, `ServerFrame`), which the round-trip tests pin. One additive
@@ -930,6 +932,70 @@ This is how the macOS app is terminal-first: ⌘N and every ⌘⇧-arrow split
 start a plain shell with `cwd_of` the focused pane's session, over HTTP so the
 reply names the session and it lands in the pane that asked. See
 [SmoothFlow-macOS.md § Keyboard](SmoothFlow-macOS.md#keyboard).
+
+### Shell names and pre-warmed shells (SMOODEV-4127) {#shell-names}
+
+**Fast path.** `flow.new {kind: shell}` with no `argv` does no inference on
+the request path: the row is created, the shell launched, and the reply sent.
+The only extra work is one `git rev-parse` for the branch. The pearl is
+inferred on a background thread, because `th pearls` costs about 100 ms, and
+the row is re-broadcast if a pearl turns up.
+
+**Pre-warmed shells** (`smooth_flow::prewarm`). A login shell takes 0.4–0.7 s
+to reach its first prompt, and nothing in the engine can shorten that. So the
+engine keeps up to three spare shells already sitting at a prompt, one per
+directory, under tmux sessions named `flowspare-<id>`. A spare has no row, so
+it never shows up in `flow.hello`, `th flow ls` or on a phone.
+
+- **Claiming.** A new shell in a directory that has a spare claims it. tmux
+  renames the spare to the id it was launched with, and the row is created
+  under that id. The id matters because the exit wrapper already knows it.
+- **When a spare starts:**
+    - after every new shell, for its directory;
+    - on `flow.prewarm {worktree? | cwd_of?}`, a hint with no reply. SmoothFlow
+      sends it on connect, on focus change, and when the focused pane's
+      directory changes.
+- **Discarded instead of claimed:** a spare that died, or one older than 30
+  minutes.
+- **Cleanup.** The daemon kills its spares on shutdown and reaps any that an
+  earlier daemon left behind when it starts.
+- **Turning it off.** `SMOOTH_FLOW_PREWARM=0` disables it. Tests and scratch
+  engines never pre-warm, since only `flow_route::install` calls
+  `Engine::enable_prewarm`.
+
+Measured from POST to the prompt glyph on screen (isolated release daemon,
+zsh + starship, this repo):
+
+| stage                     | before (0.86.0) | after, spare ready | after, no spare |
+| ------------------------- | --------------- | ------------------ | --------------- |
+| `POST /api/flow/sessions` | 145–177 ms      | 37–75 ms           | 48–94 ms        |
+| attach → first output     | 13–18 ms        | 13–16 ms           | 13–15 ms        |
+| ⌘N → prompt on screen     | 657–824 ms      | **50–92 ms**       | 563–618 ms      |
+
+**Live tab names** (`smooth_flow::autotitle`). A shell's `title` follows what
+is happening in it, the way cmux and Ghostty name a tab:
+
+1. At the prompt, the name is the directory: its folder name, `~` for home,
+   `/` for the root.
+2. While a program runs, the name is the title that program set (OSC 0/2),
+   with a theme's `user@host:` prefix stripped. If the program set no title,
+   the name is its command name (`cargo`, `nvim`).
+
+The supervision tick reads `#{pane_current_command}`, `#{pane_current_path}`
+and `#{pane_title}` from tmux every 2 s and writes `title` only when it
+changed. tmux keeps a pane's title after the program that set it exits, so a
+title is believed only if it differs from the title the pane had at its last
+prompt. Agent sessions are never named this way. Shells on the `pty` host
+keep their first name, because that host cannot report these facts.
+
+**Renaming.** `flow.rename {id, title?}` and its HTTP twin `POST
+/api/flow/sessions/{id}/rename` (also `th flow rename <id> [name…]`) set
+`title` and the additive row field `title_pinned`. Nothing automatic
+overwrites a pinned title. A missing or blank title unpins the name and
+restores the automatic one: a shell is renamed from its pane immediately, and
+any other session gets back the title the rename replaced (kept in
+`auto_title`). A `title` sent in `flow.new` is also a chosen name, so it pins
+too.
 
 ### Where the session runs — the repo index (th-145e6b)
 

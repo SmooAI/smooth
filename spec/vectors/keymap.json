@@ -311,6 +311,11 @@
             "display": "⇧⌘W"
           },
           {
+            "action": "renameTab",
+            "wire": "shift+cmd+r",
+            "display": "⇧⌘R"
+          },
+          {
             "action": "previousTab",
             "wire": "shift+cmd+[",
             "display": "⇧⌘["
@@ -531,6 +536,11 @@
             "action": "closeTab",
             "wire": "ctrl+opt+shift+w",
             "display": "Ctrl+Shift+Alt+W"
+          },
+          {
+            "action": "renameTab",
+            "wire": "ctrl+opt+shift+r",
+            "display": "Ctrl+Shift+Alt+R"
           },
           {
             "action": "previousTab",
