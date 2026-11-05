@@ -1902,7 +1902,7 @@ impl Engine {
         if let Some((project, pearl, slug)) = &o.make_worktree {
             let started = Instant::now();
             if let Err(err) = Self::create_worktree(project, pearl, slug, "HEAD") {
-                return Err(self.launch_failed(id, None, err.context("creating the worktree")));
+                return Err(self.launch_failed(id, None, anyhow!("creating the worktree: {err:#}")));
             }
             crate::timing::stage(id, "worktree", started);
         }
