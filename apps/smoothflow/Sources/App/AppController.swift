@@ -112,6 +112,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] live in
             guard let self else { return }
             self.mainWindow.center.refreshHeaders()
+            self.mainWindow.center.sessionsChanged()
             self.pruneCloses(live)
         }.store(in: &subscriptions)
         daemon.onRestart = { [weak self] ep in self?.client.connect(to: ep) }
@@ -152,6 +153,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     func shutdown() {
         guard started, !didShutdown else { return }
         didShutdown = true
+        mainWindow?.center.saveLayout()
         client.disconnect()
         daemon.stop()
         if UserDefaults.standard.object(forKey: "tmuxOwnedByApp") as? Bool ?? true { daemon.stopTmuxServer() }
@@ -229,7 +231,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func surface(for id: String) -> TerminalSurfaceView {
         if let v = surfaces[id] { return v }
-        let v = TerminalSurfaceView(sessionId: id)
+        let v = TerminalSurfaceView(sessionId: id, mirrorsReplies: store.sessions[id]?.hostAnswersQueries ?? false)
         // A done/dead row keeps its surface for scrollback; input and the
         // layout-driven resize must not reach the engine (it answers
         // "not running" for each, which used to land in the rail).

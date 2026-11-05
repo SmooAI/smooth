@@ -64,6 +64,27 @@ holding a **binary split tree** of panes (nested `NSSplitView`s — no
 third-party splitter, bonsplit's submodule is not vendored here); see
 [SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
 
+On a `pty` session (`flow.session.host == "pty"`) the surface uses
+`GHOSTTY_SURFACE_IO_MANUAL_MIRROR` instead (`TerminalSurfaceView.ioMode`):
+the same manual I/O, but ghostty's parser doesn't answer DA/DSR and similar
+queries, because the session host already did (ADR-014). A tmux session keeps
+`GHOSTTY_SURFACE_IO_MANUAL`, since tmux swallows its client's answers.
+
+### The layout survives a relaunch (SMOODEV-4238, ADR-014)
+
+Tabs, each tab's split tree and divider fractions, focus, zoom, the active tab
+and which session each pane shows are saved as one JSON value in the app's
+defaults (`surfaceLayout`; `Sources/UI/SavedLayout.swift`). The save is
+debounced 0.5 s after any change and also runs in `shutdown`. On launch,
+`buildSurfaceArea` restores it with fresh pane ids. Leaves are saved by
+position, because `PaneID`s are process-local.
+
+Panes re-render as their sessions arrive from the engine. A live session is
+re-adopted, a dead agent is resumed and a shell reopens in its last directory
+(see [SmoothFlow § pty host](SmoothFlow.md#pty-host)), so the panes fill back
+in. A pane whose session the engine no longer knows comes back empty. It is
+never removed, and a corrupt or newer-version value is ignored.
+
 ## Daemon lifecycle and TCC — the part cmux gets wrong
 
 macOS attributes a TCC decision to the **responsible process**, and only an app
@@ -98,9 +119,11 @@ daemon it did not start:
 Every quit sender — ⌘Q, the app and status-item menus, AppleScript `quit`,
 `NSRunningApplication.terminate()` (what the release lane uses to install over
 a running copy) — arrives as `NSApplication.terminate(_:)`, and
-`applicationShouldTerminate` takes the fleet down **before** answering
-`.terminateNow`: disconnect, stop the child daemon, kill the app-owned tmux
-server. It never answers `.terminateLater` (nothing to forget to reply to) or
+`applicationShouldTerminate` takes the daemon down **before** answering
+`.terminateNow`: save the layout, disconnect, stop the child daemon, kill the
+app-owned tmux server. That kill reaches tmux rows only. Since ADR-014, the
+default `pty` sessions are `setsid` hosts that outlive the quit, and the next
+launch re-adopts them. It never answers `.terminateLater` (nothing to forget to reply to) or
 `.terminateCancel` (quit means quit); `applicationWillTerminate` runs the same
 idempotent shutdown for the paths that skip the delegate question.
 

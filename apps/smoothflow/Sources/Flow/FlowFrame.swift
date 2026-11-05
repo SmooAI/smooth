@@ -73,12 +73,15 @@ struct Session: Codable, Equatable, Identifiable {
     var endedAt: String?
     var exitCode: Int?
     var unread: Bool
+    /// Where the session runs: `pty` (the engine-owned session host) or
+    /// `tmux`. Absent from older engines, which means tmux.
+    var host: String?
     /// SMOODEV-4127: `title` is a name someone gave the session (⌘⇧R), so it
     /// is the tab's name whatever else the row says.
     var titlePinned: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread
+        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread, host
         case titlePinned = "title_pinned"
         case pearlId = "pearl_id", agentSessionId = "agent_session_id", tmuxSession = "tmux_session"
         case fanOutId = "fan_out_id", createdAt = "created_at", updatedAt = "updated_at", endedAt = "ended_at", exitCode = "exit_code"
@@ -87,11 +90,11 @@ struct Session: Codable, Equatable, Identifiable {
     init(id: String, kind: String = "claude", title: String = "", project: String = "", worktree: String = "", branch: String? = nil,
          pearlId: String? = nil, agentSessionId: String? = nil, argv: [String] = [], tmuxSession: String? = nil, pid: Int? = nil,
          state: SessionState = .idle, attention: Attention? = nil, fanOutId: String? = nil, createdAt: String = "", updatedAt: String = "",
-         endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false, titlePinned: Bool = false) {
+         endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false, host: String? = nil, titlePinned: Bool = false) {
         self.id = id; self.kind = kind; self.title = title; self.project = project; self.worktree = worktree; self.branch = branch
         self.pearlId = pearlId; self.agentSessionId = agentSessionId; self.argv = argv; self.tmuxSession = tmuxSession; self.pid = pid
         self.state = state; self.attention = attention; self.fanOutId = fanOutId; self.createdAt = createdAt; self.updatedAt = updatedAt
-        self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread; self.titlePinned = titlePinned
+        self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread; self.host = host; self.titlePinned = titlePinned
     }
 
     init(from decoder: Decoder) throws {
@@ -123,8 +126,14 @@ struct Session: Codable, Equatable, Identifiable {
         endedAt = try c.decodeIfPresent(String.self, forKey: .endedAt)
         exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
         unread = try c.decodeIfPresent(Bool.self, forKey: .unread) ?? false
+        host = try c.decodeIfPresent(String.self, forKey: .host)
         titlePinned = try c.decodeIfPresent(Bool.self, forKey: .titlePinned) ?? false
     }
+
+    /// The session host answers the program's terminal queries itself
+    /// (`pty`), so this client's terminal must not answer them too
+    /// (SmoothFlow.md § Replay, engine rule 7).
+    var hostAnswersQueries: Bool { host == "pty" }
 
     /// Sidebar label: pearl id when there is one, else the title.
     var label: String { pearlId.map { "\($0) \(title)" } ?? title }

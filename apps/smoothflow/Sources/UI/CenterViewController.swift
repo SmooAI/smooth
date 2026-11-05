@@ -17,8 +17,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     private let tabBar = SurfaceTabBar()
     private let treeView = PaneTreeView()
     private let surfaceArea = NSStackView()
-    private var surfaceTabs: [SurfaceTab] = []
-    private var activeTabIndex = 0
+    private var surfaceTabs: [SurfaceTab] = [] { didSet { layoutChanged() } }
+    private var activeTabIndex = 0 { didSet { layoutChanged() } }
     private var nextTabId = 1
     /// th-26f5b9: the native review viewer (engine-computed structured diffs).
     private(set) lazy var diffView = DiffView(app: app)
@@ -177,8 +177,49 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             t.root = t.root.settingFraction(f, between: a, and: b)
             self.replaceActiveTab(t, relayout: false)
         }
-        surfaceTabs = [SurfaceTab(id: nextTabId, pane: PaneID.next())]
-        nextTabId += 1
+        if let saved = LayoutPersistence.load(), let restored = saved.restore(firstTabId: nextTabId) {
+            // SMOODEV-4238: every tab and split comes back where it was; the
+            // panes fill as the engine's hello names their sessions.
+            surfaceTabs = restored.tabs
+            activeTabIndex = restored.active
+            nextTabId += restored.tabs.count
+            awaitingSessions = saved.sessionIds
+        } else {
+            surfaceTabs = [SurfaceTab(id: nextTabId, pane: PaneID.next())]
+            nextTabId += 1
+        }
+        renderTabs()
+    }
+
+    // MARK: layout persistence (SMOODEV-4238)
+
+    /// Sessions a restored pane shows that the engine has not named yet.
+    private var awaitingSessions: Set<String> = []
+    private var pendingSave: DispatchWorkItem?
+
+    /// The tabs changed: write them out soon, coalescing a burst of edits.
+    private func layoutChanged() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveLayout() }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Write the layout now (quit runs this so the last edit is never lost).
+    func saveLayout() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        guard !surfaceTabs.isEmpty else { return }
+        LayoutPersistence.save(SavedLayout(surfaceTabs, active: activeTabIndex))
+    }
+
+    /// The fleet changed: a restored pane whose session just arrived gets its
+    /// surface. Nothing to do once every restored session has been seen.
+    func sessionsChanged() {
+        guard !awaitingSessions.isEmpty else { return }
+        let arrived = awaitingSessions.filter { app.store.sessions[$0] != nil }
+        guard !arrived.isEmpty else { return }
+        awaitingSessions.subtract(arrived)
         renderTabs()
     }
 

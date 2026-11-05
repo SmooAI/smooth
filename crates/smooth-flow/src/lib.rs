@@ -26,7 +26,9 @@ pub mod protocol;
 pub mod pty;
 #[cfg(all(unix, feature = "pty-host"))]
 pub mod pty_host;
+pub mod replies;
 pub mod repos;
+pub mod restore;
 pub mod scrape;
 #[cfg(feature = "pty-host")]
 pub mod session_host;
