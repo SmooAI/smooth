@@ -655,6 +655,8 @@ pub mod fake {
     pub struct FakeHost {
         state: Mutex<State>,
         kind: HostKind,
+        /// While set, the next launch waits on it (SMOODEV-4267).
+        launch_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
 
     impl FakeHost {
@@ -667,6 +669,14 @@ pub mod fake {
         /// `PtyHost` answers with its VT state.
         pub fn with_kind(kind: HostKind) -> Arc<Self> {
             Arc::new(Self { kind, ..Self::default() })
+        }
+
+        /// Hold the next launch until the returned sender sends or drops, so a
+        /// test can look at a session whose process doesn't exist yet.
+        pub fn hold_next_launch(&self) -> std::sync::mpsc::Sender<()> {
+            let (release, gate) = std::sync::mpsc::channel();
+            *self.launch_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+            release
         }
 
         /// What the next [`SessionHost::adopt_existing`] reports.
@@ -758,6 +768,10 @@ pub mod fake {
         }
 
         fn launch(&self, s: &SessionRef, spec: &Launch<'_>) -> Result<u32> {
+            let gate = self.launch_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
             if spec.argv.is_empty() {
                 bail!("cannot launch an empty argv");
             }

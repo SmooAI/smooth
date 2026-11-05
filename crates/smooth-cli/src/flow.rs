@@ -886,6 +886,8 @@ async fn cmd_new(a: NewArgs) -> Result<()> {
         "title": title,
         "tmux_socket": tmux_socket,
         "argv": if argv.is_empty() { Value::Null } else { json!(argv) },
+        // A terminal has nobody watching a row: say here if it failed.
+        "wait": true,
     });
     let v = call(reqwest::Method::POST, "/api/flow/sessions", Some(body)).await?;
     let id = v.pointer("/session/id").and_then(Value::as_str).unwrap_or("").to_string();

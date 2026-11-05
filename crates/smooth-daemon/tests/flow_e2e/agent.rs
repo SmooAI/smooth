@@ -205,6 +205,8 @@ async fn agent_that_dies_is_resumed_with_its_session_id(host: Host) {
     let s = d.new_session("fake-agent", Some("/work once; /crash 2")).await;
     let id = s["id"].as_str().unwrap().to_string();
     let agent_id = s["agent_session_id"].as_str().unwrap().to_string();
+    // A new session answers before it launches; its first pid is on the row a moment later.
+    let launched = d.wait_until(&id, "launched", WAIT, |s| s["pid"].is_u64()).await;
 
     // Death → starting + `crashed` attention with the schedule (rule 2).
     let crashed = d.wait_until(&id, "crashed attention", WAIT, |s| s["attention"]["reason"] == "crashed").await;
@@ -227,7 +229,7 @@ async fn agent_that_dies_is_resumed_with_its_session_id(host: Host) {
     let screen = d.wait_screen(&id, "resume=1", WAIT).await;
     assert!(screen.contains(&format!("sid={agent_id} resume=1")), "{screen}");
     let idle = d.wait_state(&id, "idle", WAIT).await;
-    assert!(idle["pid"].as_u64().unwrap() != s["pid"].as_u64().unwrap(), "a new process: {idle}");
+    assert!(idle["pid"].as_u64().unwrap() != launched["pid"].as_u64().unwrap(), "a new process: {idle}");
     // The story is in the event stream: crashed, then starting, then idle.
     let mut texts = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

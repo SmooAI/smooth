@@ -939,6 +939,56 @@ still that pearl's worktree, the title is just unknown.
 without sending them. An explicit value always wins. `th flow new` with no
 arguments starts a session in the CURRENT directory.
 
+### Opening an agent (SMOODEV-4267) {#opening-an-agent}
+
+`flow.new` answers as soon as the row exists; the slow work happens after the
+reply. `Engine::begin_session` validates the request (unknown kind, unusable
+directory), writes the row in `starting` and returns. A `flow-open` thread then
+does the rest, holding the session lock so a kill cannot interleave:
+
+1. **Worktree**, when a pearl asked for one. It is made before the launch,
+   because the agent runs inside it. The row already names the path.
+2. **Launch**, which starts the process and hands over what clients did while
+   there was none.
+3. **Inference**, which fills in the branch, pearl and title. It never replaces
+   a title the user has since changed.
+
+The WS loop handles a client's frames inline, so a slow `flow.new` used to stop
+that client's output and input for every tab. This is the larger part of why
+the reply comes first.
+
+**A failure lands on the row.** A worktree or launch failure leaves the row
+`dead` with attention `launch_failed` and the reason. A row killed before its
+launch never launches. A row left with no process by a daemon that stopped
+mid-launch fails with `launch_failed` at the next start.
+
+**Clients can use the row at once.** While the launch runs, `flow.attach`,
+`flow.resize` and `flow.replay` are remembered and applied when the process
+exists. `flow.input` is queued up to 64 KiB, and input past that limit is
+dropped with a warning. `flow.send` and sending a key must reach a process, so
+they wait for the launch, up to two minutes.
+
+**Callers that need the process** pass `wait: true` on
+`POST /api/flow/sessions`: the reply then comes after the launch, carries the
+`pid`, and a launch failure is an error rather than a row. `th flow new` and the
+MCP `flow_new` tool do this. Without `wait` a reply has no `pid` yet, so read it
+from the row.
+
+**Ready faster.** An agent in `starting`, or with a prompt waiting to be pasted,
+is supervised every 200 ms by a boot watcher for up to 30 s, rather than on the
+2 s tick. A pasted prompt goes in at the first check that reads idle, at least
+1 s after the launch and at most 90 s, and never into a pending question.
+Harnesses with no way to report idle (`amp`, `th-code`) keep the fixed 4 s delay.
+
+**Manifests are cached.** `Engine::registry` keeps the parsed registry until the
+fingerprint of the manifest files changes (path, size, mtime), so `th harness
+add` still needs no restart. A load cost 26 ms, and supervision ran one per
+session per tick.
+
+**Timings.** Every stage logs to the `flow_timing` target: `RUST_LOG=warn,flow_timing=info`.
+Stages are `pool_queue`, `resolve_project`, `manifests`, `argv`, `row`,
+`response`, `worktree`, `host_launch`, `infer`, `attach` and `ready_hook`.
+
 ### Where a shell opens — `cwd_of` (SMOODEV-4111)
 
 `flow.new` (and `POST /api/flow/sessions`) take an additive `cwd_of: <session
