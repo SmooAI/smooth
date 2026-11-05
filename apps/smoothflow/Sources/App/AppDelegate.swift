@@ -243,7 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `representedObject`, so a rebind never has to touch a selector.
     @objc private func runAction(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let action = FlowAction(rawValue: raw) else { return }
-        run(action, tag: sender.tag)
+        TabLatency.measure(raw) { run(action, tag: sender.tag) }
     }
 
     func run(_ action: FlowAction, tag: Int = 0) {

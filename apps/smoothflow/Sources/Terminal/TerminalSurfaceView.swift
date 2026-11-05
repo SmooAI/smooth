@@ -15,6 +15,10 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     var onResize: ((Int, Int) -> Void)?
     var onTitle: ((String) -> Void)?
     var onFocus: ((Bool) -> Void)?
+    /// The pane hosting this surface wants to know it took focus. Set (not
+    /// chained) by each host, so moving a surface between panes and tabs
+    /// never stacks handlers (SMOODEV-4127).
+    var onHostFocus: (() -> Void)?
     /// The directory the program in the terminal announced (OSC 7 →
     /// `GHOSTTY_ACTION_PWD`). A hint only: the engine's tmux read is the
     /// source of truth for where a split opens (SMOODEV-4111).
@@ -113,14 +117,25 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// The window the screen observers and display id were set up for.
+    private weak var observedWindow: NSWindow?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // Moving between panes or tabs of the same window passes through
+        // here (often twice); the display, scale and size have not changed,
+        // so redoing them only costs the tab switch time (SMOODEV-4127).
+        guard let window, window !== observedWindow else { return }
+        observedWindow = window
         observeScreen()
         screenChanged()
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        // Also sent on every re-parent; only a real scale change matters
+        // here (a new screen is `observeScreen`'s job).
+        guard let scale = window?.backingScaleFactor, scale != appliedScale else { return }
         screenChanged()
     }
 
@@ -143,7 +158,7 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     private func screenChanged() {
         updateDisplayID()
         updateScale()
-        updateSize()
+        updateSize(force: true)
     }
 
     private func updateDisplayID() {
@@ -162,17 +177,29 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         updateSize()
     }
 
+    /// The backing scale last pushed to Ghostty.
+    private var appliedScale: CGFloat = 0
+
     private func updateScale() {
         guard let surface else { return }
         let scale = window?.backingScaleFactor ?? 2
+        appliedScale = scale
         (layer as? CAMetalLayer)?.contentsScale = scale
         ghostty_surface_set_content_scale(surface, scale, scale)
     }
 
-    private func updateSize() {
+    /// The pixel size last pushed to Ghostty.
+    private var appliedSize: (w: UInt32, h: UInt32) = (0, 0)
+
+    private func updateSize(force: Bool = false) {
         guard let surface, bounds.width > 0, bounds.height > 0 else { return }
         let scale = window?.backingScaleFactor ?? 2
-        ghostty_surface_set_size(surface, UInt32(bounds.width * scale), UInt32(bounds.height * scale))
+        let size = (w: UInt32(bounds.width * scale), h: UInt32(bounds.height * scale))
+        // `layout()` runs on every pass of the window, a tab switch included;
+        // an unchanged size needs no resize and no follow-up checks.
+        guard force || size != appliedSize else { return }
+        appliedSize = size
+        ghostty_surface_set_size(surface, size.w, size.h)
         // Ghostty applies the size on its own thread, so the grid read right
         // here is still the OLD one (a window resize never reached the engine
         // as `flow.resize` — measured: cols stuck at the first attach). Check
@@ -209,7 +236,7 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
-        if ok, let surface { ghostty_surface_set_focus(surface, true); onFocus?(true) }
+        if ok, let surface { ghostty_surface_set_focus(surface, true); onFocus?(true); onHostFocus?() }
         return ok
     }
 
