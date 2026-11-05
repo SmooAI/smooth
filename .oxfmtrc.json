@@ -24,6 +24,7 @@
         "docs/model-leaderboard.json",
         "crates/smooth-web/web/src/model-scores.json",
         "crates/smooth-api-client/openapi.json",
+        "crates/smooth-bench/fixtures/**",
         "spec/vectors/**"
     ]
 }

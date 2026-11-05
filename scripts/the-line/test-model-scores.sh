@@ -129,6 +129,33 @@ else
     fail=$((fail + 1)); echo "FAIL: the leaderboard table must carry a safety column"
 fi
 
+# merge-model-scores.sh: benching new models must ADD rows, not replace the
+# board (SMOODEV-4125).
+merge="$here/merge-model-scores.sh"
+cat >"$work/merge-base.json" <<'JSON'
+{ "suite": "agentic", "trials": 3, "scenario_count": 28, "models": [
+  { "model": "old-a", "pass_rate_pct": 90.0, "passed": 9, "conclusive": 10, "cost_usd": 0.5, "duration_s": 1 },
+  { "model": "gpt-6-luna", "pass_rate_pct": 50.0, "passed": 5, "conclusive": 10, "cost_usd": 0.1, "duration_s": 1 }
+] }
+JSON
+cat >"$work/merge-new.json" <<'JSON'
+{ "suite": "agentic", "trials": 3, "scenario_count": 28, "models": [
+  { "model": "gpt-6-luna", "pass_rate_pct": 90.0, "passed": 9, "conclusive": 10, "cost_usd": 0.2, "duration_s": 1 },
+  { "model": "claude-haiku-5-5", "pass_rate_pct": 80.0, "passed": 8, "conclusive": 10, "duration_s": 1 }
+] }
+JSON
+merged=$(bash "$merge" "$work/merge-base.json" "$work/merge-new.json")
+check "merge keeps the existing models" "" "$(jq -r '[.models[].model] | join(",")' <<<"$merged")" 'old-a'
+check "merge replaces a re-benched model and ranks it" "" "$(jq -r '[.models[].model] | join(",")' <<<"$merged")" 'gpt-6-luna,old-a,claude-haiku-5-5'
+check "merge keeps one row per model" "" "$(jq -r '.models | length' <<<"$merged")" '3'
+check "merge keeps the run metadata" "" "$(jq -r '.suite' <<<"$merged")" 'agentic'
+sed 's/"trials": 3/"trials": 1/' "$work/merge-new.json" >"$work/merge-1trial.json"
+if bash "$merge" "$work/merge-base.json" "$work/merge-1trial.json" >/dev/null 2>&1; then
+    fail=$((fail + 1)); echo "FAIL: merging boards with different trial counts must be refused"
+else
+    pass=$((pass + 1))
+fi
+
 # The README carries a hand-written excerpt of the board. It is a marketing
 # surface with typed-in numbers, and the board regenerates weekly — exactly the
 # shape of thing that rots silently. Fail here rather than publish a stale claim.

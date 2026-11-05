@@ -5302,6 +5302,7 @@ dependencies = [
  "clap",
  "dirs-next",
  "futures-util",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
