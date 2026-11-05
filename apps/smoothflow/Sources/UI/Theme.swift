@@ -39,12 +39,18 @@ enum Theme {
 
     static func stateLabel(_ s: Session) -> String {
         // A state nothing has confirmed lately is what the row last was.
-        if s.confidence != .confirmed { return currentStateLabel(s) + "?" }
-        // An ask waits as long as it takes; show how long that has been.
-        if s.state == .needsYou, let since = s.attention?.since, !relative(since).isEmpty {
-            return currentStateLabel(s) + " · " + relative(since)
-        }
-        return currentStateLabel(s)
+        s.confidence == .confirmed ? currentStateLabel(s) : currentStateLabel(s) + "?"
+    }
+
+    /// How long an ask has waited, for a view that redraws on a timer: nothing
+    /// else redraws a row while it waits. Empty for an unreadable stamp.
+    static func waited(_ since: String, now: Date) -> String {
+        guard let d = ISO8601DateFormatter.flexible.date(from: since) else { return "" }
+        let secs = Int(now.timeIntervalSince(d))
+        if secs < 60 { return "waiting <1m" }
+        if secs < 3600 { return "waiting \(secs / 60)m" }
+        if secs < 86400 { return "waiting \(secs / 3600)h" }
+        return "waiting \(secs / 86400)d"
     }
 
     private static func currentStateLabel(_ s: Session) -> String {

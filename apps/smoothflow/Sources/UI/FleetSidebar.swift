@@ -71,6 +71,13 @@ struct FleetSidebar: View {
                 Text(Theme.stateLabel(s) + (s.state == .done && app.handoffs[s.id]?.pr?.number != nil ? " · PR #\(app.handoffs[s.id]!.pr!.number!)" : ""))
                     .font(.caption).foregroundStyle(s.needsYou ? Color(Theme.amber) : Color(Theme.muted))
                     .accessibilityIdentifier("sidebar.state.\(s.id)")
+                if s.state == .needsYou, let since = s.attention?.since {
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Text(Theme.waited(since, now: context.date))
+                            .font(.caption2).foregroundStyle(Color(Theme.faint))
+                            .accessibilityIdentifier("sidebar.waited.\(s.id)")
+                    }
+                }
             }
             Spacer()
             if s.unread { UnreadBadge() }
