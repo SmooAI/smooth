@@ -7777,18 +7777,15 @@ quiet_ms = 300
         assert!(e.get(&s.id).unwrap().is_none());
     }
 
-    /// After a reboot a shell reconnects; an agent waits for the user.
+    /// After an interruption a shell reconnects; an agent waits for the user.
+    /// Uses the clean-quit marker because a boot id isn't readable everywhere.
     #[test]
-    fn a_reboot_reconnects_remote_shells_and_parks_remote_agents() {
+    fn an_interruption_reconnects_remote_shells_and_parks_remote_agents() {
         let tmp = tempfile::tempdir().unwrap();
         let (e, host) = fake_engine(tmp.path());
         let agent = remote_new(&e, SessionKind::Claude, "box", None, None).unwrap();
         let shell = remote_new(&e, SessionKind::Shell, "box", Some("/srv"), None).unwrap();
-        e.with_store(|st| {
-            st.set_boot_id(&agent.id, Some("an-earlier-boot"))?;
-            st.set_boot_id(&shell.id, Some("an-earlier-boot"))
-        })
-        .unwrap();
+        e.with_store(|st| st.set_config(&crate::restore::clean_quit_key(FAKE_SOCKET), "1")).unwrap();
         host.vanish(&host_ref(&agent));
         host.vanish(&host_ref(&shell));
         e.restore_interrupted().unwrap();
