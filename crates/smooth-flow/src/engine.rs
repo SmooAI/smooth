@@ -28,6 +28,7 @@ use crate::protocol::{
     FlowEvent, HookEvent, HookOutcome, ReplayReason, ServerFrame,
 };
 use crate::pty::OnOutput;
+use crate::restore::{RESTORABLE, RESTORE_STAGGER, RESTORING};
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
 use crate::{diff, limit, tmux};
 
@@ -70,6 +71,9 @@ const HARNESS_PREFS_KEY: &str = "harness_prefs";
 /// The pane env var naming the flow session row (th-b00115); hooks post it
 /// back as `flow_id`.
 pub const FLOW_ID_ENV: &str = "SMOOTH_FLOW_ID";
+
+/// Why an agent row is `restorable` rather than relaunched (th-0937a1).
+const NOT_RESENT: &str = "not relaunched: it has no harness session id to resume, and starting it again would send its prompt again";
 
 /// The attention reason on a row whose launch failed (th-9f6814): no tmux,
 /// tmux refused, or the harness binary is missing. The detail says which.
@@ -373,6 +377,10 @@ struct Inner {
     health: Option<Mutex<HealthCache>>,
     /// `Some` when the host asked for a repo index (th-145e6b).
     repo_index: Option<Mutex<RepoIndex>>,
+    /// This boot of the machine, recorded on every launch (th-0937a1).
+    boot_id: Option<String>,
+    /// Set once the first supervision pass has restored interrupted rows.
+    restored: std::sync::OnceLock<()>,
 }
 
 /// The repo index's scan state (th-145e6b). The rows live in flow.db, so a
@@ -613,6 +621,13 @@ pub fn resume_argv(session: &Session, registry: &Registry) -> Vec<String> {
     }
 }
 
+/// A `SessionStart` from `/clear` (or `/new`): the same harness process
+/// starting a new session (th-0937a1). A fresh launch reports `startup`, and
+/// a nested harness is one; `resume` and `compact` never move the row.
+fn is_clear(ev: &HookEvent) -> bool {
+    ev.event == "SessionStart" && matches!(ev.payload.get("source").and_then(Value::as_str), Some("clear" | "new"))
+}
+
 /// Rule 2's backoff: `base · 2^attempt`.
 #[must_use]
 pub fn resume_backoff(attempt: u32) -> Duration {
@@ -849,6 +864,8 @@ impl Engine {
                         scanned_at: None,
                     })
                 }),
+                boot_id: crate::restore::current_boot_id(),
+                restored: std::sync::OnceLock::new(),
             }),
         };
         engine.wire_hosts();
@@ -1765,7 +1782,10 @@ impl Engine {
             Err(err) => return Err(self.launch_failed(&session.id, Some((host, &target)), err)),
         };
         let start = host.process_start(pid);
-        self.with_store(|st| st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv))?;
+        self.with_store(|st| {
+            st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv)?;
+            st.set_boot_id(&session.id, self.inner.boot_id.as_deref())
+        })?;
         if let Some(agent) = &session.agent_session_id {
             self.rt().claims.insert(agent.clone(), (pid, Instant::now()));
         }
@@ -2590,6 +2610,20 @@ impl Engine {
             }
             return match s.agent_session_id.as_deref() {
                 Some(bound) if bound == ev.session_id => Ok(Some((s, true))),
+                // th-0937a1: `/clear` starts a new harness session in the
+                // same process. Follow it, or a resume reopens the cleared one.
+                Some(bound) if !ev.session_id.is_empty() && is_clear(ev) && self.same_kind(&s, ev) => {
+                    self.with_store(|st| st.set_agent_session(&s.id, &ev.session_id))?;
+                    {
+                        let mut rt = self.rt();
+                        rt.claims.remove(bound);
+                        if let Some(pid) = s.pid {
+                            rt.claims.insert(ev.session_id.clone(), (pid, Instant::now()));
+                        }
+                    }
+                    tracing::info!(session = %s.id, from = bound, to = %ev.session_id, "flow: harness session cleared — rebound its id");
+                    Ok(self.get(&s.id)?.map(|s| (s, true)))
+                }
                 Some(bound) => {
                     // A nested harness inherited this pane's token, or a
                     // token is being replayed against another session.
@@ -2600,7 +2634,7 @@ impl Engine {
                 // A harness of another kind started inside this pane
                 // inherited the token: it must not claim the row (th-b00115's
                 // rule, now under the token).
-                None if !ev.harness.is_empty() && kind_for_harness(&self.registry(), &ev.harness).as_ref() != Some(&s.kind) => {
+                None if !self.same_kind(&s, ev) => {
                     tracing::debug!(session = %s.id, harness = %ev.harness, "flow hook refused: token's row is another harness kind");
                     Ok(None)
                 }
@@ -2636,6 +2670,13 @@ impl Engine {
         Ok(adopted.map(|s| (s, false)))
     }
 
+    /// Whether `ev` could come from `s`'s harness: it names none, or `s`'s
+    /// kind. A harness of another kind started inside the pane inherited its
+    /// token and must not speak for the row.
+    fn same_kind(&self, s: &Session, ev: &HookEvent) -> bool {
+        ev.harness.is_empty() || kind_for_harness(&self.registry(), &ev.harness).as_ref() == Some(&s.kind)
+    }
+
     /// Finish a pending permission request (called by the host after the
     /// long-poll resolves or times out). Returns the harness reply body.
     #[must_use]
@@ -2664,6 +2705,7 @@ impl Engine {
     /// # Errors
     /// On a store failure (per-session tmux/ps errors are logged, not raised).
     pub fn supervise_tick(&self) -> Result<()> {
+        self.ensure_restored();
         let now = Utc::now();
         let mine = self.default_socket();
         for s in self.with_store(FlowStore::list_live)?.into_iter().filter(|s| owned_here(s, &mine)) {
@@ -2709,6 +2751,7 @@ impl Engine {
     /// Supervise one session now (a host reported its exit), if this
     /// engine owns it.
     fn supervise_id(&self, id: &str) {
+        self.ensure_restored();
         let Ok(Some(s)) = self.get(id) else { return };
         if s.state.is_terminal() || !owned_here(&s, &self.default_socket()) {
             return;
@@ -2757,7 +2800,7 @@ impl Engine {
         // not in it, and the stale copy sent the row to `on_death` instead.
         let fresh = self.with_store(|st| st.get(&s.id))?;
         let Some(s) = fresh.as_ref() else { return Ok(()) };
-        if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+        if s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
             return Ok(());
         }
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
@@ -2882,6 +2925,97 @@ impl Engine {
         Ok(())
     }
 
+    /// The daemon is shutting down cleanly (th-0937a1): record it, so the next
+    /// start reads a row whose host went away in between as interrupted, not
+    /// crashed. The SmoothFlow app stops its daemon BEFORE it kills its tmux
+    /// server, so the marker is written while the fleet is still up.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn shutdown(&self) -> Result<()> {
+        let key = crate::restore::clean_quit_key(&self.default_socket());
+        self.with_store(|st| st.set_config(&key, &Utc::now().to_rfc3339()))?;
+        tracing::info!(marker = %key, "flow: clean shutdown recorded");
+        Ok(())
+    }
+
+    /// Run [`Self::restore_interrupted`] once, before any supervision; a
+    /// concurrent caller waits for it rather than reading a restored row as a
+    /// crash.
+    fn ensure_restored(&self) {
+        self.inner.restored.get_or_init(|| {
+            if let Err(e) = self.restore_interrupted() {
+                tracing::warn!(error = %e, "flow: restoring interrupted sessions");
+            }
+        });
+    }
+
+    /// The first supervision pass after a start (th-0937a1): every live row
+    /// of ours whose host session is gone, and that was launched in an earlier
+    /// boot or outlived a clean quit, was interrupted. An agent whose
+    /// conversation can be resumed is scheduled to resume, [`RESTORE_STAGGER`]
+    /// apart, without counting against rule 2's crash budget; one that cannot
+    /// is left `needs_you` + [`RESTORABLE`]. Shells, and rows nothing says were
+    /// interrupted, are left to supervision as before. Consumes this daemon's
+    /// clean-quit marker.
+    fn restore_interrupted(&self) -> Result<()> {
+        let mine = self.default_socket();
+        let clean_quit = self.with_store(|st| st.take_config(&crate::restore::clean_quit_key(&mine)))?.is_some();
+        let registry = self.registry();
+        let mut due = Vec::new();
+        for s in self.with_store(FlowStore::list_live)?.into_iter().filter(|s| owned_here(s, &mine)) {
+            if s.adopted || !s.kind.is_agent() || s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
+                continue;
+            }
+            let (Some(t), Ok(host)) = (s.tmux_session.as_deref(), self.host_for(&s)) else {
+                continue;
+            };
+            if host.alive(&SessionRef::new(socket_of(&s, &mine), t)) || self.recorded_exit(&s) == Some(0) {
+                continue;
+            }
+            let row_boot = self.with_store(|st| st.boot_id(&s.id))?;
+            let Some(why) = crate::restore::interruption(row_boot.as_deref(), self.inner.boot_id.as_deref(), clean_quit) else {
+                continue;
+            };
+            self.drop_pty(&s.id);
+            self.revoke_hook_token(&s.id);
+            self.clear_exit_files(&s.id);
+            if !crate::restore::resume_continues(&s, &registry) {
+                tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session cannot be resumed — restorable");
+                let att = Attention::new(RESTORABLE).with_detail(format!("{}; {NOT_RESENT}", why.describe()));
+                self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
+                continue;
+            }
+            let at = Instant::now() + RESTORE_STAGGER.saturating_mul(u32::try_from(due.len()).unwrap_or(u32::MAX));
+            tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session — resuming");
+            {
+                let mut rt = self.rt();
+                rt.relaunch_at.insert(s.id.clone(), at);
+                // A resume after an interruption is not a crash.
+                rt.resume_attempts.remove(&s.id);
+            }
+            let att = Attention::new(RESTORING).with_detail(format!("{}; resuming its conversation", why.describe()));
+            self.set_state(&s.id, SessionState::Starting, Some(att))?;
+            due.push((s.id, at));
+        }
+        if due.is_empty() {
+            return Ok(());
+        }
+        // The supervision tick fires these when due too; this only keeps the
+        // stagger finer than its period.
+        let e = self.clone();
+        std::thread::Builder::new()
+            .name("flow-restore".into())
+            .spawn(move || {
+                for (id, at) in due {
+                    std::thread::sleep(at.saturating_duration_since(Instant::now()));
+                    e.supervise_id(&id);
+                }
+            })
+            .context("spawn the restore thread")?;
+        Ok(())
+    }
+
     /// `needs_you` raised by the scraper (not a hook's pending approval).
     fn scraped_needs_you(&self, s: &Session) -> bool {
         s.state == SessionState::NeedsYou
@@ -2910,6 +3044,14 @@ impl Engine {
             let state = if exit == PaneExit::Code(0) { SessionState::Done } else { SessionState::Dead };
             let att = (state == SessionState::Dead).then(|| Attention::new("crashed").with_detail(detail_exit));
             self.set_state(&s.id, state, att)?;
+            return Ok(());
+        }
+        // th-0937a1: a relaunch that would type the prompt in again is not a
+        // resume. Leave it to the user.
+        if crate::restore::relaunch_resends_prompt(s, &self.registry()) {
+            self.rt().relaunch_at.remove(&s.id);
+            let att = Attention::new(RESTORABLE).with_detail(format!("{detail_exit}; {NOT_RESENT}"));
+            self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
             return Ok(());
         }
         let attempt = {
@@ -6450,5 +6592,295 @@ quiet_ms = 300
         assert_eq!(h.state, SessionState::NeedsYou);
         assert_eq!(h.attention.as_ref().unwrap().reason, "held");
         assert!(h.attention.unwrap().detail.unwrap().contains("protocol 9"));
+    }
+
+    // ── restore after an interruption (th-0937a1) ─────────────────────────
+
+    /// The same flow.db and fake host, as a daemon restart sees them.
+    fn reopen(tmp: &Path, tmux: &Arc<FakeHost>, pty: Option<&Arc<FakeHost>>) -> Engine {
+        let mut cfg = EngineConfig::new(tmp.to_path_buf());
+        cfg.db_path = tmp.join("flow.db");
+        cfg.home = tmp.join("home");
+        cfg.daemon_url = Some("http://127.0.0.1:1".into());
+        cfg.host = tmux.clone();
+        cfg.pty_host = pty.map(|p| p.clone() as Arc<dyn SessionHost>);
+        Engine::open(cfg).unwrap()
+    }
+
+    fn agent(e: &Engine, tmp: &Path, kind: SessionKind, argv: &[&str]) -> Session {
+        e.new_session(NewRequest {
+            kind,
+            worktree: Some(tmp.to_string_lossy().into()),
+            argv: Some(argv.iter().map(|a| (*a).to_string()).collect()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// Poll until `pred` holds (at most 10 s), returning when it first did.
+    fn eventually(mut pred: impl FnMut() -> bool) -> Instant {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if pred() {
+                return Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("condition never held");
+    }
+
+    /// The app quits: the daemon records a clean shutdown, then the tmux
+    /// server dies with every pane. On the next start an agent with a harness
+    /// session resumes it — staggered, its crash budget untouched — one
+    /// without is `restorable` and never relaunched with its prompt, and a
+    /// shell dies as before.
+    #[test]
+    fn a_clean_quit_resumes_agents_staggered_and_never_resends_a_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let claude = agent(&e, tmp.path(), SessionKind::Claude, &["/nonexistent/claude"]);
+        let codex = agent(&e, tmp.path(), SessionKind::Codex, &["/nonexistent/codex", "fix the bug"]);
+        e.with_store(|st| st.set_agent_session(&codex.id, "thread-1")).unwrap();
+        let codex = e.get(&codex.id).unwrap().unwrap();
+        let idless = agent(&e, tmp.path(), SessionKind::Codex, &["/nonexistent/codex", "write the tests"]);
+        let shell = fake_shell(&e, tmp.path(), &["sh"]);
+        e.supervise_tick().unwrap();
+        e.shutdown().unwrap();
+        assert!(e
+            .with_store(|st| st.get_config(&crate::restore::clean_quit_key(FAKE_SOCKET)))
+            .unwrap()
+            .is_some());
+        drop(e);
+        let first_pids: HashMap<String, u32> = [&claude, &codex, &idless, &shell]
+            .iter()
+            .map(|s| (s.id.clone(), host.session(&host_ref(s)).unwrap().pid))
+            .collect();
+        for s in [&claude, &codex, &idless, &shell] {
+            host.vanish(&host_ref(s));
+        }
+
+        let e = reopen(tmp.path(), &host, None);
+        let started = Instant::now();
+        e.supervise_tick().unwrap();
+        assert!(
+            e.with_store(|st| st.get_config(&crate::restore::clean_quit_key(FAKE_SOCKET)))
+                .unwrap()
+                .is_none(),
+            "the marker is read once"
+        );
+
+        let relaunched = |s: &Session| host.session(&host_ref(s)).is_some_and(|f| f.pid != first_pids[&s.id]);
+        let first = eventually(|| relaunched(&claude));
+        let second = eventually(|| relaunched(&codex));
+        assert!(second >= started + RESTORE_STAGGER, "the second resume waits its turn");
+        assert!(first <= second);
+        assert_eq!(host.session(&host_ref(&claude)).unwrap().argv, resume_argv(&claude, &reg()));
+        assert_eq!(host.session(&host_ref(&codex)).unwrap().argv, ["/nonexistent/codex", "resume", "thread-1"]);
+        for s in [&claude, &codex] {
+            let row = e.get(&s.id).unwrap().unwrap();
+            assert_eq!(row.state, SessionState::Starting, "{row:?}");
+            assert_eq!(row.attention, None, "the relaunch clears `restoring`");
+            assert!(!e.rt().resume_attempts.contains_key(&s.id), "an interruption is not a crash");
+        }
+
+        let row = e.get(&idless.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::NeedsYou, "waiting on the user, not finished");
+        let att = row.attention.unwrap();
+        assert_eq!(att.reason, RESTORABLE);
+        let detail = att.detail.unwrap();
+        assert!(detail.contains("SmoothFlow quit") && detail.contains("send its prompt again"), "{detail}");
+        assert!(host.session(&host_ref(&idless)).is_none(), "never relaunched");
+        let launches = host.calls().iter().filter(|c| c.starts_with(&format!("launch {} ", idless.id))).count();
+        assert_eq!(launches, 1, "the prompt went out once: {:?}", host.calls());
+
+        let row = e.get(&shell.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::Dead, "shells are phase 2: {row:?}");
+        assert!(row.attention.unwrap().detail.unwrap().contains("process vanished"));
+    }
+
+    /// While a restore is pending the row says so; supervision does not read
+    /// its missing process as a crash.
+    #[test]
+    fn a_restoring_row_is_starting_with_the_reason_until_its_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let rows: Vec<Session> = (0..4).map(|_| agent(&e, tmp.path(), SessionKind::Claude, &["/nonexistent/claude"])).collect();
+        e.shutdown().unwrap();
+        drop(e);
+        for s in &rows {
+            host.vanish(&host_ref(s));
+        }
+        let e = reopen(tmp.path(), &host, None);
+        e.ensure_restored();
+        // The last is ≥ 900 ms out: still waiting, whatever the thread did.
+        let last = e.get(&rows[3].id).unwrap().unwrap();
+        assert_eq!(last.state, SessionState::Starting);
+        let att = last.attention.unwrap();
+        assert_eq!(att.reason, RESTORING);
+        assert!(att.detail.unwrap().contains("resuming its conversation"));
+        e.supervise_tick().unwrap();
+        let last = e.get(&rows[3].id).unwrap().unwrap();
+        assert_ne!(
+            last.attention.as_ref().map(|a| a.reason.as_str()),
+            Some("crashed"),
+            "a pending restore is not a crash: {last:?}"
+        );
+        for s in &rows {
+            eventually(|| host.session(&host_ref(s)).is_some());
+        }
+        assert_eq!(host.calls().iter().filter(|c| c.starts_with("launch ")).count(), 8, "each resumed exactly once");
+    }
+
+    /// A reboot needs no marker: the row's boot is not this one. A `pty` row
+    /// is restored the same way, where a lone vanish reads as unknown.
+    #[test]
+    fn a_reboot_resumes_tmux_and_pty_agents() {
+        if crate::restore::current_boot_id().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let pty = FakeHost::with_kind(HostKind::Pty);
+        let (e, tmux) = two_host_engine(tmp.path(), HostKind::Pty, &pty);
+        let on_pty = agent(&e, tmp.path(), SessionKind::Claude, &["/nonexistent/claude"]);
+        assert_eq!(on_pty.host, HostKind::Pty);
+        assert_eq!(
+            e.with_store(|st| st.boot_id(&on_pty.id)).unwrap(),
+            crate::restore::current_boot_id(),
+            "a launch records its boot"
+        );
+        e.with_store(|st| st.set_boot_id(&on_pty.id, Some("an-earlier-boot"))).unwrap();
+        drop(e);
+        pty.vanish(&host_ref(&on_pty));
+        let e = reopen(tmp.path(), &tmux, Some(&pty));
+        e.supervise_tick().unwrap();
+        eventually(|| pty.session(&host_ref(&on_pty)).is_some());
+        assert_eq!(pty.session(&host_ref(&on_pty)).unwrap().argv, resume_argv(&on_pty, &reg()));
+        assert_eq!(
+            e.with_store(|st| st.boot_id(&on_pty.id)).unwrap(),
+            crate::restore::current_boot_id(),
+            "the resume is in this boot"
+        );
+    }
+
+    /// Regression: with no marker and the same boot, a vanished process is
+    /// still a crash — rule 2's budget and backoff, and a `pty` row is unknown.
+    #[test]
+    fn without_a_clean_quit_or_a_reboot_a_vanish_is_still_a_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let claude = agent(&e, tmp.path(), SessionKind::Claude, &["/nonexistent/claude"]);
+        drop(e);
+        host.vanish(&host_ref(&claude));
+        let e = reopen(tmp.path(), &host, None);
+        e.supervise_tick().unwrap();
+        let row = e.get(&claude.id).unwrap().unwrap();
+        let att = row.attention.unwrap();
+        assert_eq!(att.reason, "crashed");
+        assert!(att.detail.unwrap().contains("attempt 1/"));
+        assert_eq!(e.rt().resume_attempts.get(&claude.id), Some(&1));
+    }
+
+    /// The no-resend rule holds for a plain crash too: an agent with no
+    /// harness id whose argv carries the prompt is never relaunched.
+    #[test]
+    fn a_crashed_agent_without_a_harness_id_is_restorable_not_relaunched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let idless = agent(&e, tmp.path(), SessionKind::Codex, &["/nonexistent/codex", "write the tests"]);
+        host.die(&host_ref(&idless), PaneDeath::Code(1));
+        e.supervise_tick().unwrap();
+        let row = e.get(&idless.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::NeedsYou, "{row:?}");
+        let att = row.attention.unwrap();
+        assert_eq!(att.reason, RESTORABLE);
+        assert!(att.detail.unwrap().starts_with("exit 1; not relaunched"));
+        assert!(!e.rt().relaunch_at.contains_key(&idless.id));
+        // Supervision leaves it parked: no relaunch, no second death.
+        e.supervise_tick().unwrap();
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&idless.id).unwrap().unwrap().attention.unwrap().reason, RESTORABLE);
+        assert_eq!(host.calls().iter().filter(|c| c.starts_with("launch ")).count(), 1);
+        // The user resumes it: the original argv, and the row is live again.
+        let resumed = e.kill(&idless.id, true).unwrap();
+        assert_eq!((resumed.state, resumed.attention), (SessionState::Starting, None));
+        assert_eq!(host.session(&host_ref(&idless)).unwrap().argv, ["/nonexistent/codex", "write the tests"]);
+        // With an id it is a resume, as before.
+        let bound = agent(&e, tmp.path(), SessionKind::Codex, &["/nonexistent/codex", "write the tests"]);
+        e.with_store(|st| st.set_agent_session(&bound.id, "thread-2")).unwrap();
+        host.die(&host_ref(&bound), PaneDeath::Code(1));
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&bound.id).unwrap().unwrap().state, SessionState::Starting);
+        assert!(e.rt().relaunch_at.contains_key(&bound.id));
+    }
+
+    /// `/clear` gives the harness a new session id in the same process: the
+    /// row follows it, so a resume reopens the conversation the user is in.
+    /// Nothing else moves the binding.
+    #[test]
+    fn a_clear_rebinds_the_harness_session_and_nothing_else_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let s = agent(&e, tmp.path(), SessionKind::Claude, &["/nonexistent/claude"]);
+        let old = s.agent_session_id.clone().unwrap();
+        let caller = token_caller(&e, &s.id);
+        let start = |sid: &str, harness: &str, source: &str| HookEvent {
+            harness: harness.into(),
+            event: "SessionStart".into(),
+            session_id: sid.into(),
+            cwd: Some(tmp.path().to_string_lossy().into()),
+            payload: json!({ "source": source }),
+            flow_id: None,
+        };
+        let bound = || e.get(&s.id).unwrap().unwrap().agent_session_id.unwrap();
+        // A nested launch, a resume of another session, a compact: refused.
+        for source in ["startup", "resume", "compact", ""] {
+            e.hook(start("other", "claude", source), &caller).unwrap();
+            assert_eq!(bound(), old, "{source:?} does not move the row");
+        }
+        // Another kind of harness inside the pane: refused.
+        e.hook(start("other", "codex", "clear"), &caller).unwrap();
+        assert_eq!(bound(), old);
+        // No token: refused.
+        e.hook(start("other", "claude", "clear"), &HookCaller::anonymous()).unwrap();
+        assert_eq!(bound(), old);
+        // Not a SessionStart.
+        let mut stop = start("other", "claude", "clear");
+        stop.event = "Stop".into();
+        e.hook(stop, &caller).unwrap();
+        assert_eq!(bound(), old);
+        // `/clear`: rebound, and the hook itself counts.
+        e.hook(start("cleared", "claude", "clear"), &caller).unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.agent_session_id.as_deref(), Some("cleared"));
+        assert_eq!(row.state, SessionState::Idle, "SessionStart brought it up");
+        assert_eq!(resume_argv(&row, &reg()), ["/nonexistent/claude", "--resume", "cleared"]);
+        assert!(e.rt().claims.contains_key("cleared") && !e.rt().claims.contains_key(&old));
+        // `/new` too; and the old id no longer speaks for it.
+        e.hook(start("newer", "claude", "new"), &caller).unwrap();
+        assert_eq!(bound(), "newer");
+        e.with_store(|st| st.set_state(&s.id, SessionState::Working, None)).unwrap();
+        e.hook(hook_from("cleared", "Stop", tmp.path()), &caller).unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working, "the cleared id is refused");
+    }
+
+    /// Each daemon sharing a flow.db reads only its own marker.
+    #[test]
+    fn a_clean_quit_marker_belongs_to_one_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let claude = agent(&e, tmp.path(), SessionKind::Claude, &["/nonexistent/claude"]);
+        e.with_store(|st| st.set_config(&crate::restore::clean_quit_key("another-daemon"), "x"))
+            .unwrap();
+        drop(e);
+        host.vanish(&host_ref(&claude));
+        let e = reopen(tmp.path(), &host, None);
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&claude.id).unwrap().unwrap().attention.unwrap().reason, "crashed");
+        assert!(
+            e.with_store(|st| st.get_config(&crate::restore::clean_quit_key("another-daemon")))
+                .unwrap()
+                .is_some(),
+            "not ours to consume"
+        );
     }
 }
