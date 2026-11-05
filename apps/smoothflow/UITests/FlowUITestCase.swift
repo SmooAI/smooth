@@ -127,6 +127,11 @@ class FlowUITestCase: XCTestCase {
 
     // MARK: app
 
+    /// `-surfaceLayout none` shadows the saved layout: every launch starts with
+    /// one empty pane. Defaults written by an earlier test outlive its temp HOME
+    /// on CI, so without this its splits come back in the next test.
+    static let launchArguments = ["-onboarded", "YES", "-ApplePersistenceIgnoreState", "YES", "-NSQuitAlwaysKeepsWindows", "NO", "-surfaceLayout", "none"]
+
     func launchApp() throws {
         // XCUIApplication.launch() kills any running instance of the bundle id — that
         // would be the developer's real SmoothFlow.app (and its daemon's TCC lineage).
@@ -139,7 +144,7 @@ class FlowUITestCase: XCTestCase {
                    "HOME": tmp.appendingPathComponent("home").path, "CFFIXED_USER_HOME": tmp.appendingPathComponent("home").path]
         if let token { env["SMOOTHFLOW_DAEMON_TOKEN"] = token }
         a.launchEnvironment = env
-        a.launchArguments = ["-onboarded", "YES", "-ApplePersistenceIgnoreState", "YES", "-NSQuitAlwaysKeepsWindows", "NO"]
+        a.launchArguments = Self.launchArguments
         a.launch()
         app = a
         XCTAssertTrue(app.windows["SmoothFlow"].waitForExistence(timeout: 20), "main window")
@@ -167,7 +172,7 @@ class FlowUITestCase: XCTestCase {
         let home = tmp.appendingPathComponent("home").path
         a.launchEnvironment = ["SMOOTHFLOW_DAEMON_BIN": daemon.path, "SMOOTHFLOW_UI_TEST": "1", "HOME": home, "CFFIXED_USER_HOME": home,
                                "TMPDIR": tmp.appendingPathComponent("tmux").path, "TMUX_TMPDIR": tmp.appendingPathComponent("tmux").path]
-        a.launchArguments = ["-onboarded", "YES", "-ApplePersistenceIgnoreState", "YES", "-NSQuitAlwaysKeepsWindows", "NO"]
+        a.launchArguments = Self.launchArguments
         a.launch()
         app = a
         XCTAssertTrue(app.windows["SmoothFlow"].waitForExistence(timeout: 20), "main window")
