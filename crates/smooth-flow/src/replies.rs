@@ -110,9 +110,9 @@ fn dcs_reply(data: &[u8]) -> Option<usize> {
 /// passes.
 fn osc_reply(data: &[u8]) -> Option<usize> {
     let body = &data[2..];
-    let (end, term) = body.iter().enumerate().find_map(|(i, b)| match b {
-        &BEL => Some((i, 1)),
-        &ESC if body.get(i + 1) == Some(&b'\\') => Some((i, 2)),
+    let (end, term) = body.iter().enumerate().find_map(|(i, b)| match *b {
+        BEL => Some((i, 1)),
+        ESC if body.get(i + 1) == Some(&b'\\') => Some((i, 2)),
         _ => None,
     })?;
     let text = std::str::from_utf8(&body[..end]).ok()?;
