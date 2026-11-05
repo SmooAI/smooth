@@ -287,7 +287,13 @@ async fn new_session(
 ) -> Result<Json<Value>, ApiErr> {
     gate(&st, &headers, &q)?;
     let e = st.engine.clone();
-    let s = blocking(move || e.new_session(body.into())).await?;
+    let asked = std::time::Instant::now();
+    let s = blocking(move || {
+        smooth_flow::timing::stage("-", "pool_queue", asked);
+        e.new_session(body.into())
+    })
+    .await?;
+    smooth_flow::timing::stage(&s.id, "response", asked);
     Ok(Json(json!({ "session": s })))
 }
 

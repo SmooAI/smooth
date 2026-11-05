@@ -191,6 +191,9 @@ struct Runtime {
     limit_resumed_at: HashMap<String, Instant>,
     /// Session id → pending `prompt_as = "paste"` prompt.
     paste_at: HashMap<String, PendingPaste>,
+    /// Session id → when this launch's host was asked to start it, until the
+    /// harness first reads ready ([`crate::timing`]).
+    booting: HashMap<String, Instant>,
     /// Session id → (hash of the last captured pane text, when it last
     /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
     pane_seen: HashMap<String, (u64, Instant)>,
@@ -224,6 +227,8 @@ struct PendingPaste {
     /// `Some(deadline)`: wait for a scraped idle until then (th-d2a1e4).
     /// `None`: paste at `at`, whatever the pane shows.
     wait_idle_until: Option<Instant>,
+    /// When the session launched.
+    asked: Instant,
 }
 
 impl PendingPaste {
@@ -1612,6 +1617,7 @@ impl Engine {
     /// # Errors
     /// When the worktree can't be resolved/created or tmux refuses.
     pub fn new_session(&self, mut req: NewRequest) -> Result<Session> {
+        let opened = Instant::now();
         self.resolve_cwd_of(&mut req)?;
         let project = req
             .project
@@ -1619,6 +1625,7 @@ impl Engine {
             .map(PathBuf::from)
             .or_else(|| req.worktree.as_deref().map(|w| project_root(Path::new(w))))
             .unwrap_or_else(|| self.inner.default_project.clone());
+        let t = crate::timing::stage("-", "resolve_project", opened);
         let worktree = match (&req.worktree, &req.pearl_id) {
             (Some(w), _) => PathBuf::from(w),
             (None, Some(pearl)) => {
@@ -1631,10 +1638,12 @@ impl Engine {
         if !worktree.is_dir() {
             bail!("worktree does not exist: {}", worktree.display());
         }
+        let t = crate::timing::stage("-", "worktree", t);
         if !req.kind.is_agent() {
             return self.new_shell(&req, &project, &worktree);
         }
         let registry = self.registry();
+        let t = crate::timing::stage("-", "manifests", t);
         let manifest = if req.kind.is_agent() {
             Some(manifest_for(&registry, &req.kind)?)
         } else {
@@ -1669,7 +1678,9 @@ impl Engine {
         // th-c103c1: nothing here is demanded of the caller — the pearl, the
         // branch and the title are inferred from the worktree when they were
         // not given. An explicit value always wins.
+        let t = crate::timing::stage("-", "argv", t);
         let inferred = crate::infer::gather(&worktree);
+        let t = crate::timing::stage("-", "infer", t);
         let branch = inferred.branch.clone().or_else(|| git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
         let pearl_id = req.pearl_id.clone().or_else(|| inferred.pearl_id.clone());
         let title = req
@@ -1694,8 +1705,10 @@ impl Engine {
                 host: Some(self.inner.new_host),
             })
         })?;
+        crate::timing::stage(&session.id, "row", t);
         let env = self.launch_env(manifest, &session);
         let session = self.launch(&session, &argv, &env)?;
+        crate::timing::stage(&session.id, "new_total", opened);
         if let (true, Some(p)) = (paste, prompt) {
             // Wait for the composer only when this manifest can tell us it is up.
             let can_see_idle = manifest.is_some_and(|m| {
@@ -1712,6 +1725,7 @@ impl Engine {
                 prompt: p.to_string(),
                 at,
                 wait_idle_until,
+                asked: now,
             };
             self.rt().paste_at.insert(session.id.clone(), pending);
         }
@@ -2080,6 +2094,7 @@ impl Engine {
         }
         let prefix = self.exit_prefix(&session.id);
         let cwd = self.launch_dir(session);
+        let host_asked = Instant::now();
         let launched = host.launch(
             &target,
             &Launch {
@@ -2093,6 +2108,10 @@ impl Engine {
             Ok(pid) => pid,
             Err(err) => return Err(self.launch_failed(&session.id, Some((host, &target)), err)),
         };
+        crate::timing::stage(&session.id, "host_launch", host_asked);
+        if session.kind.is_agent() {
+            self.rt().booting.insert(session.id.clone(), host_asked);
+        }
         let start = host.process_start(pid);
         self.with_store(|st| {
             st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv)?;
@@ -2104,6 +2123,14 @@ impl Engine {
         let s = self.require(&session.id)?;
         self.emit_session(&s);
         Ok(s)
+    }
+
+    /// The harness of `id` first read ready: log how long its boot took.
+    fn boot_done(&self, id: &str, stage: &str) {
+        let since = self.rt().booting.remove(id);
+        if let Some(since) = since {
+            crate::timing::stage(id, stage, since);
+        }
     }
 
     /// A launch failed (no tmux, tmux refused, the harness binary missing):
@@ -2213,6 +2240,7 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or not running.
     pub fn attach(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
+        let asked = Instant::now();
         let before = self.replay_size(id);
         let resized = self.pty_for(id, cols, rows, true)?.resize(cols, rows);
         if resized.is_err() {
@@ -2222,6 +2250,7 @@ impl Engine {
         }
         resized?;
         self.resized(id, before, (cols, rows));
+        crate::timing::stage(id, "attach", asked);
         Ok(())
     }
 
@@ -2773,6 +2802,7 @@ impl Engine {
                 }
             }
             HookOutcome::Started => {
+                self.boot_done(&s.id, "ready_hook");
                 if s.state == SessionState::Starting {
                     self.set_state(&s.id, SessionState::Idle, None)?;
                 }
@@ -3276,6 +3306,7 @@ impl Engine {
                 if s.state == SessionState::Working {
                     self.with_store(|st| st.set_unread(&s.id, true))?;
                 }
+                self.boot_done(&s.id, "ready_scrape");
                 self.set_state(&s.id, SessionState::Idle, None)?;
             }
             _ => {}
@@ -3287,6 +3318,9 @@ impl Engine {
             rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
         };
         if let Some(p) = paste {
+            if let Some(asked) = self.rt().paste_at.get(&s.id).map(|q| q.asked) {
+                crate::timing::stage(&s.id, "paste_wait", asked);
+            }
             self.rt().paste_at.remove(&s.id);
             self.send(&s.id, &p)?;
         }
@@ -5756,6 +5790,7 @@ mod tests {
             prompt: "p".into(),
             at: now + Duration::from_secs(1),
             wait_idle_until: Some(now + Duration::from_secs(90)),
+            asked: now,
         };
         assert!(!gated.due(now, PaneState::Idle), "not before `at`");
         let later = now + Duration::from_secs(2);
