@@ -33,6 +33,7 @@ pub mod restore;
 pub mod scrape;
 #[cfg(feature = "pty-host")]
 pub mod session_host;
+pub mod status;
 pub mod store;
 pub mod timing;
 pub mod tmux;

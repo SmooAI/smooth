@@ -23,6 +23,17 @@ enum AttentionReason: String, Codable, Equatable {
     }
 }
 
+/// How far a row's state can be believed (SMOODEV-4268). An older engine sends
+/// none, which reads as confirmed: it never doubted anything.
+enum Confidence: String, Codable, Equatable {
+    case confirmed, stale, unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = Confidence(rawValue: raw) ?? .confirmed
+    }
+}
+
 struct Attention: Codable, Equatable {
     var reason: AttentionReason
     var detail: String?
@@ -30,8 +41,10 @@ struct Attention: Codable, Equatable {
     var requestId: String?
     /// Holder pid for `held` (engine sends it in `detail` or as `pid`).
     var pid: Int?
+    /// When this ask began (SMOODEV-4268). Absent from older engines.
+    var since: String?
 
-    enum CodingKeys: String, CodingKey { case reason, detail, resumeAt = "resume_at", requestId = "request_id", pid }
+    enum CodingKeys: String, CodingKey { case reason, detail, resumeAt = "resume_at", requestId = "request_id", pid, since }
 
     init(reason: AttentionReason, detail: String? = nil, resumeAt: String? = nil, requestId: String? = nil, pid: Int? = nil) {
         self.reason = reason
@@ -48,6 +61,7 @@ struct Attention: Codable, Equatable {
         resumeAt = try c.decodeIfPresent(String.self, forKey: .resumeAt)
         requestId = try c.decodeFlexibleString(forKey: .requestId)
         pid = try c.decodeIfPresent(Int.self, forKey: .pid)
+        since = try c.decodeIfPresent(String.self, forKey: .since)
     }
 
     var resumeDate: Date? { resumeAt.flatMap { ISO8601DateFormatter.flexible.date(from: $0) } }
@@ -82,9 +96,11 @@ struct Session: Codable, Equatable, Identifiable {
     /// SMOODEV-4269: the session runs on another machine over ssh. `argv` is
     /// then what runs there, and `worktree` is empty.
     var remote: RemoteTarget?
+    /// `stale` / `unknown`: the state is what the row last was, not what it is.
+    var confidence: Confidence
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread, host, remote
+        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread, host, remote, confidence
         case titlePinned = "title_pinned"
         case pearlId = "pearl_id", agentSessionId = "agent_session_id", tmuxSession = "tmux_session"
         case fanOutId = "fan_out_id", createdAt = "created_at", updatedAt = "updated_at", endedAt = "ended_at", exitCode = "exit_code"
@@ -94,12 +110,13 @@ struct Session: Codable, Equatable, Identifiable {
          pearlId: String? = nil, agentSessionId: String? = nil, argv: [String] = [], tmuxSession: String? = nil, pid: Int? = nil,
          state: SessionState = .idle, attention: Attention? = nil, fanOutId: String? = nil, createdAt: String = "", updatedAt: String = "",
          endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false, host: String? = nil, titlePinned: Bool = false,
-         remote: RemoteTarget? = nil) {
+         remote: RemoteTarget? = nil, confidence: Confidence = .confirmed) {
         self.id = id; self.kind = kind; self.title = title; self.project = project; self.worktree = worktree; self.branch = branch
         self.pearlId = pearlId; self.agentSessionId = agentSessionId; self.argv = argv; self.tmuxSession = tmuxSession; self.pid = pid
         self.state = state; self.attention = attention; self.fanOutId = fanOutId; self.createdAt = createdAt; self.updatedAt = updatedAt
         self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread; self.host = host; self.titlePinned = titlePinned
         self.remote = remote
+        self.confidence = confidence
     }
 
     init(from decoder: Decoder) throws {
@@ -133,6 +150,7 @@ struct Session: Codable, Equatable, Identifiable {
         unread = try c.decodeIfPresent(Bool.self, forKey: .unread) ?? false
         host = try c.decodeIfPresent(String.self, forKey: .host)
         titlePinned = try c.decodeIfPresent(Bool.self, forKey: .titlePinned) ?? false
+        confidence = try c.decodeIfPresent(Confidence.self, forKey: .confidence) ?? .confirmed
         remote = try c.decodeIfPresent(RemoteTarget.self, forKey: .remote)
     }
 

@@ -30,6 +30,16 @@
                 ]
             }
         ],
+        "PermissionRequest": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "th flow hook codex PermissionRequest || exit 0"
+                    }
+                ]
+            }
+        ],
         "PostToolUse": [
             {
                 "hooks": [

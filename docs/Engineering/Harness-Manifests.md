@@ -78,6 +78,7 @@ install = "how the hooks get wired — free text shown by `th harness show`"
 [state.hooks.event_map]       # harness event → working | idle | needs_you | ended | ignore
 # empty ⇒ the Claude Code table (UserPromptSubmit/PreToolUse/PostToolUse → working, Stop → idle,
 # PermissionRequest / Notification(permission|question) → needs_you, SessionEnd → ended)
+# hold_permission = false     # reply to PermissionRequest at once; see "State sources"
 
 [state.scrape]                # case-insensitive regexes over the visible pane
 working = ["esc to interrupt"]
@@ -96,6 +97,7 @@ where = "last_line"           # tail (default) | pane | last_line | cursor_line 
 # all = ["model:"]            # every one must also hit the window
 # unless = ["esc cancel"]     # void if any hits the window
 # unless_below = ["^>"]       # void if one hits a line BELOW the last `match` line
+# reason = "question"         # needs_you only: permission (default, approvable) | question (answered at the pane)
 # quiet_ms = 1500             # the pane text has not changed for ≥ this long
 # changed_within_ms = 5000    # the pane text changed less than this long ago
 # alternate_screen = true     # require the alternate screen on / off
@@ -222,6 +224,25 @@ session_id, cwd, payload}`). `install` says how that gets wired
   The daemon has no in-process turn-end seam (the operator's `LocalServer`
   owns the WS `send_message` path); when the engine exposes one, the reporter
   can move daemon-side without touching the manifest.
+
+**A hook is not the last word.** Scraping keeps running after the first hook,
+and overrules it where no harness reports the change: a prompt denied at the
+terminal, a turn interrupted with Esc, a resume whose hook never comes. Rules
+and thresholds: [How a row's state is decided](../Architecture/SmoothFlow.md#status).
+So a manifest with hooks still needs `needs_you`, `working` and `idle` scrape
+patterns, and for each prompt a rule that recognises it.
+
+**`hold_permission`.** By default a `PermissionRequest` hook is held open until
+`flow.approve` answers it, which suits a harness that draws its prompt while the
+hook runs (Claude Code). Set `hold_permission = false` for one that waits for the
+hook before drawing (Codex) or whose hook is only a notification (OpenCode): the
+row still reads `needs_you`, and `flow.approve` presses the manifest's `[steer]`
+keys. Check by holding the hook: if the prompt never appears, set it.
+
+**A rule's `reason`.** A `needs_you` rule is an approval by default, one tap from
+any client with `approve_keys`. Use `reason = "question"` for anything where
+that tap would be wrong: free-choice questions, and first-run dialogs such as
+Claude Code's trust dialog, whose first option is "No, exit".
 
 ### `th code` limitations
 

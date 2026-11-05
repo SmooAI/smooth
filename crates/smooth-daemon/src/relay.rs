@@ -2374,6 +2374,7 @@ mod tests {
             host: smooth_flow::host::default_host(),
             pty_host: None,
             new_host: smooth_flow::HostKind::Tmux,
+            status_windows: smooth_flow::status::StatusWindows::default(),
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine, Some("tok".into()));
@@ -2592,6 +2593,7 @@ mod tests {
             host: smooth_flow::host::default_host(),
             pty_host: None,
             new_host: smooth_flow::HostKind::Tmux,
+            status_windows: smooth_flow::status::StatusWindows::default(),
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine.clone(), Some("tok".into()));

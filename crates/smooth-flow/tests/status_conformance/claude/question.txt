@@ -1,0 +1,40 @@
+
+❯ rig-tool please run the thing
+
+  Ran 1 shell command
+
+⏺ Done.
+
+✻ Churned for 4s · done 11:14 PM
+
+❯ rig-tool please run it once more
+
+  Ran 1 shell command
+  ⎿  Allowed by PermissionRequest hook
+
+⏺ Done.
+
+✻ Crunched for 4s · done 11:14 PM
+
+❯ rig-tool please run it again
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cogitated for 1s · done 11:14 PM
+
+❯ rig-question ask me something
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color should the rig use?
+
+❯ 1. Teal
+     the teal one
+  2. Amber
+     the amber one
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

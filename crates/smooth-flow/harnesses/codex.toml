@@ -23,6 +23,9 @@ source = "hooks"
 
 [state.hooks]
 install = "th harness enable codex  # wires `th flow hook` into ~/.codex/hooks.json (Codex 0.153+)"
+# Codex runs PermissionRequest BEFORE it draws the prompt, so holding the hook
+# open hides the prompt ("Running hook"). Reply at once; approval is by key.
+hold_permission = false
 
 [state.scrape]
 working = ["esc to interrupt", "esc to cancel", "\\(running", "tokens · esc"]
@@ -32,9 +35,30 @@ needs_you = ["do you want to proceed", "do you want to make this edit", "❯ 1\\
 usage_limit = ["usage limit reached", "approaching usage limit", "limit will reset", "limit resets at", "out of credits"]
 error = ["api error", "fatal error", "request failed", "execution error"]
 
+# SMOODEV-4268: rules run before the flat lists: the approval footer says "esc to
+# cancel", which the flat `working` list reads as busy. Captured live from Codex
+# 0.162.0.
+[[state.scrape.rules]]
+name = "codex-approval"
+state = "needs_you"
+reason = "permission"
+match = ["would you like to run the following command", "would you like to make the following edits", "press enter to confirm or esc to cancel"]
+unless_below = ["for shortcuts", "esc to interrupt"]
+
+# Trust folder, hooks review: answered in the pane, not by the approval keys.
+[[state.scrape.rules]]
+name = "codex-dialog"
+state = "needs_you"
+reason = "question"
+match = ["enter continue · esc back", "enter confirm · esc skip", "t trust · esc back"]
+
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"
+# "1. Yes, proceed (y)", "2. Yes, and don't ask again (p)", "3. No (esc)".
+approve_keys = ["y"]
+allow_session_keys = ["p"]
+deny_keys = ["Escape"]
 
 [kill]
 signal = "TERM"

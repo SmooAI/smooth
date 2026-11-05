@@ -716,6 +716,8 @@ mod tests {
             host: crate::host::HostKind::Tmux,
             title_pinned: false,
             remote: None,
+            confidence: crate::status::Confidence::default(),
+            confirmed_at: None,
         }
     }
 

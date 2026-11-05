@@ -95,6 +95,12 @@ pub struct RuleSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub state: Verdict,
+    /// A `needs_you` rule only: what is being asked. `permission` (the
+    /// default) can be approved with the manifest's approval keys; `question`
+    /// is a dialog those keys would answer wrongly, so it is shown to the
+    /// person and never offered as a one-tap approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Any-of, case-insensitive and multi-line (`^` / `$` anchor each line of
     /// the window). Empty ⇒ no text condition (a signal decides).
     /// A `usage_limit` pattern may carry `(?P<reset>…)`.
@@ -166,6 +172,7 @@ impl<'a> PaneObservation<'a> {
 pub struct Rule {
     pub name: Option<String>,
     pub state: Verdict,
+    reason: Option<String>,
     patterns: Vec<Regex>,
     scope: Scope,
     lines: usize,
@@ -186,6 +193,8 @@ pub struct Hit {
     pub rule: String,
     /// A `usage_limit` rule's `reset` capture.
     pub reset_text: Option<String>,
+    /// A `needs_you` rule's `reason`.
+    pub reason: Option<String>,
 }
 
 fn compile(field: &str, pats: &[String]) -> Result<Vec<Regex>> {
@@ -217,6 +226,14 @@ impl Rule {
         if !spec.unless_below.is_empty() && spec.scope == Scope::Title {
             bail!("{field}.unless_below: a title has no lines below it");
         }
+        if let Some(reason) = spec.reason.as_deref() {
+            if spec.state != Verdict::NeedsYou {
+                bail!("{field}.reason: only applies to state = \"needs_you\"");
+            }
+            if !matches!(reason, "permission" | "question") {
+                bail!("{field}.reason: must be \"permission\" or \"question\", got `{reason}`");
+            }
+        }
         let lines = spec.lines.unwrap_or(tail_lines);
         if lines == 0 || lines > MAX_TAIL_LINES {
             bail!("{field}.lines: must be 1..={MAX_TAIL_LINES}, got {lines}");
@@ -224,6 +241,7 @@ impl Rule {
         Ok(Self {
             name: spec.name.clone(),
             state: spec.state,
+            reason: spec.reason.clone(),
             patterns: compile(&format!("{field}.match"), &spec.patterns)?,
             scope: spec.scope,
             lines,
@@ -302,6 +320,7 @@ pub fn first_hit(rules: &[Rule], obs: &PaneObservation<'_>) -> Option<Hit> {
             state: r.state,
             rule: r.name.clone().unwrap_or_else(|| format!("rules[{i}]")),
             reset_text,
+            reason: r.reason.clone(),
         })
     })
 }

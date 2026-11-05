@@ -1,0 +1,39 @@
+  ┃  rig-tool please run the thing
+  ┃
+
+  ┃
+  ┃  $ mkdir -p mockdir && touch mockdir/x.txt
+  ┃
+  ┃  (no output)
+  ┃
+
+     Done.
+
+     ▣  Build · mock · 26.9s
+
+  ┃
+  ┃  rig-tool please run it again
+  ┃
+
+     $ mkdir -p mockdir && touch mockdir/x.txt
+
+  ┃
+  ┃  rig-question ask me something
+  ┃
+
+     → Asked 1 question
+
+  ┃
+  ┃  rig-slow tell me a long one
+  ┃
+
+     Sure. Here is a deliberately slow answer so
+
+     ▣  Build · mock · interrupted
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · mock mock
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /work/project                  20  ctrl+p commands
