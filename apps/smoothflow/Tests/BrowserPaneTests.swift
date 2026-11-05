@@ -377,9 +377,17 @@ final class BrowserPaneViewTests: XCTestCase {
     func testAPageCannotGoToANonWebSchemeByAnyRoute() async {
         let p = pane(base())
         await loaded(p, "home")
-        _ = await script(p, "location.href = 'file:///etc/passwd'; 1")
+        // Past WebKit's own file: block, so this reaches the pane's policy.
+        _ = await script(p, "location.href = 'smoothflow-test://x'; 1")
         await wait("the script's refusal") { p.messageText == BrowserURL.onlyWeb }
         XCTAssertEqual(p.webView.url?.absoluteString, base())
+
+        // WebKit stops this one inside the page, before any policy call: the
+        // page simply stays where it is.
+        _ = await script(p, "location.href = 'file:///etc/passwd'; 1")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(p.webView.url?.absoluteString, base())
+        await loaded(p, "home")
 
         p.navigate(to: URL(string: base("/redirect-to-file"))!)
         await wait("the redirect's refusal") { p.messageText != nil && p.webView.isLoading == false }
@@ -397,7 +405,60 @@ final class BrowserPaneViewTests: XCTestCase {
         let p = pane()
         // Port 1 on loopback: refused at once.
         p.navigate(to: try XCTUnwrap(URL(string: "http://127.0.0.1:1/")))
-        await wait("the failure") { p.messageText != nil }
+        await wait(timeout: 5, "the failure on a blocked port") { p.messageText != nil }
+    }
+
+    func testAClosedPortSaysSo() async throws {
+        let closed = try NWListener(using: .tcp, on: .any)
+        closed.newConnectionHandler = { $0.cancel() }
+        closed.start(queue: .global())
+        await wait(timeout: 5, "a port") { (closed.port?.rawValue ?? 0) != 0 }
+        let number = try XCTUnwrap(closed.port?.rawValue)
+        closed.cancel()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let p = pane()
+        p.navigate(to: try XCTUnwrap(URL(string: "http://127.0.0.1:\(number)/")))
+        await wait(timeout: 10, "the failure") { p.messageText != nil }
+    }
+
+    /// Typing in the bar while a page moves must not lose the text.
+    func testAPageDoesNotOverwriteTheBarWhileItIsBeingEdited() async throws {
+        let p = pane(base())
+        await loaded(p, "home")
+        p.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+        p.navigate(to: try XCTUnwrap(URL(string: base("/two"))))
+        await loaded(p, "two")
+        XCTAssertEqual(p.locationText, base(), "the bar keeps what was there")
+        XCTAssertEqual(p.currentURL, base("/two"))
+        p.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification))
+        p.goBack()
+        await wait("the bar to follow again") { p.locationText == self.base() }
+    }
+
+    func testOnlyAPersonCanGiveThePageTheKeyboard() throws {
+        window.makeKeyAndOrderFront(nil)
+        let view = NSView(frame: NSRect(x: 100, y: 100, width: 100, height: 100))
+        window.contentView!.addSubview(view)
+        func mouse(_ type: NSEvent.EventType, _ point: NSPoint, at time: TimeInterval = 100) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [], timestamp: time, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1
+            )
+        }
+        func key(_ code: UInt16) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 100, windowNumber: window.windowNumber, context: nil,
+                characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code
+            )
+        }
+        let inside = NSPoint(x: 150, y: 150)
+        XCTAssertTrue(BrowserKeyboard.userAsked(by: mouse(.leftMouseDown, inside), for: view, now: 100.1), "a click in it")
+        XCTAssertFalse(BrowserKeyboard.userAsked(by: mouse(.leftMouseDown, NSPoint(x: 10, y: 10)), for: view, now: 100.1), "a click beside it")
+        XCTAssertFalse(BrowserKeyboard.userAsked(by: mouse(.leftMouseDown, inside), for: view, now: 105), "an old click, when a page asks later")
+        XCTAssertFalse(BrowserKeyboard.userAsked(by: mouse(.mouseMoved, inside), for: view, now: 100.1), "the pointer passing")
+        XCTAssertTrue(BrowserKeyboard.userAsked(by: key(48), for: view, now: 100.1), "Tab")
+        XCTAssertFalse(BrowserKeyboard.userAsked(by: key(0), for: view, now: 100.1), "typing in the terminal")
+        XCTAssertFalse(BrowserKeyboard.userAsked(by: nil, for: view, now: 100.1), "no event: a page asking on its own")
     }
 
     /// A page loading in the background must not take the keyboard from the

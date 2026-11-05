@@ -144,14 +144,14 @@ by itself. Web Inspector is off. Agent control of the browser is not built.
 
 **Only http and https.** `BrowserURL` has the rules:
 
-| Where                                     | Rule                                                                                                    |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| URL bar                                   | `http://`, `https://` or a bare host. Every other scheme is refused, as are `file:` and `javascript:`   |
-| URL bar, disguises                        | control characters, whitespace, backslashes, `user@host` and paths are refused                          |
-| Bare host                                 | https, except a local one (`localhost:3000`, `smoo-hub`, `.local`, private IPv4), which gets http       |
-| Top-frame navigation (links, redirects)   | `http` and `https` only, checked in `decidePolicyFor`, and never handed to macOS                        |
-| A page's own frames                       | also `about`, `data` and `blob`, which stay in the page's sandbox                                       |
-| A saved URL                               | the bar's rules again, because the saved value is editable. A failure leaves the pane empty             |
+| Where                                   | Rule                                                                                                  |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| URL bar                                 | `http://`, `https://` or a bare host. Every other scheme is refused, as are `file:` and `javascript:` |
+| URL bar, disguises                      | control characters, whitespace, backslashes, `user@host` and paths are refused                        |
+| Bare host                               | https, except a local one (`localhost:3000`, `smoo-hub`, `.local`, private IPv4), which gets http     |
+| Top-frame navigation (links, redirects) | `http` and `https` only, checked in `decidePolicyFor`, and never handed to macOS                      |
+| A page's own frames                     | also `about`, `data` and `blob`, which stay in the page's sandbox                                     |
+| A saved URL                             | the bar's rules again, because the saved value is editable. A failure leaves the pane empty           |
 
 `Info.plist` sets `NSAllowsArbitraryLoadsInWebContent`, because App Transport
 Security otherwise blocks plain http in a web view, and dev servers speak it. The

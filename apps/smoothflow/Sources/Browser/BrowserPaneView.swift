@@ -24,10 +24,39 @@ enum BrowserWebSetup {
     }
 }
 
+/// When a web view may take the keyboard. A page calling `focus()` reaches
+/// AppKit as an ordinary request for first responder, so the view asks whether a
+/// person just did something that means it: clicked in it or tabbed to it. The
+/// event must be recent because `NSApp.currentEvent` stays set long after it was
+/// handled, and a page can ask at any time.
+enum BrowserKeyboard {
+    private static let tabKey: UInt16 = 48
+    private static let recent: TimeInterval = 1
+
+    static func userAsked(by event: NSEvent?, for view: NSView, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        guard let event, event.window === view.window, view.window != nil, now - event.timestamp < recent else { return false }
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            return view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+        case .keyDown:
+            return event.keyCode == tabKey
+        default:
+            return false
+        }
+    }
+}
+
 /// A web view that says when the keyboard arrives, so its pane becomes the
-/// focused one, the way a terminal surface does.
+/// focused one, the way a terminal surface does, and that a page cannot give
+/// the keyboard to.
 private final class BrowserWebView: WKWebView {
     var onFocus: (() -> Void)?
+    /// The app itself is handing over the keyboard.
+    var keyboardGranted = false
+
+    override var acceptsFirstResponder: Bool {
+        keyboardGranted || BrowserKeyboard.userAsked(by: NSApp.currentEvent, for: self)
+    }
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
@@ -68,6 +97,8 @@ final class BrowserPaneView: NSView, NSTextFieldDelegate, WKNavigationDelegate, 
     private var observations: [NSKeyValueObservation] = []
     /// What the bar goes back to on Esc.
     private(set) var currentURL = ""
+    /// Someone is typing in the bar, so the page must not overwrite the text.
+    private var barEdited = false
 
     /// What the pane is telling you, if anything: a refusal or a failed load.
     var messageText: String? { message.isHidden ? nil : message.stringValue }
@@ -113,9 +144,9 @@ final class BrowserPaneView: NSView, NSTextFieldDelegate, WKNavigationDelegate, 
     func submit(_ typed: String) -> Bool {
         switch BrowserURL.parse(typed) {
         case let .ok(url):
-            // Out of the bar first: `record` leaves the text of a bar in use alone.
-            window?.makeFirstResponder(webView)
+            barEdited = false
             navigate(to: url)
+            giveKeyboardToPage()
             return true
         case let .rejected(why):
             show(message: why)
@@ -136,12 +167,25 @@ final class BrowserPaneView: NSView, NSTextFieldDelegate, WKNavigationDelegate, 
     func focusLocation() { window?.makeFirstResponder(location) }
 
     /// The page, or the bar while there is no page.
-    func focusContent() { window?.makeFirstResponder(currentURL.isEmpty ? location : webView) }
+    func focusContent() {
+        if currentURL.isEmpty {
+            window?.makeFirstResponder(location)
+        } else {
+            giveKeyboardToPage()
+        }
+    }
+
+    private func giveKeyboardToPage() {
+        guard let web = webView as? BrowserWebView else { return }
+        web.keyboardGranted = true
+        window?.makeFirstResponder(web)
+        web.keyboardGranted = false
+    }
 
     private func record(_ url: String) {
+        if !barEdited { location.stringValue = url }
         guard url != currentURL else { return }
         currentURL = url
-        if location.currentEditor() == nil { location.stringValue = url }
         onURLChange?(url)
     }
 
@@ -187,6 +231,7 @@ final class BrowserPaneView: NSView, NSTextFieldDelegate, WKNavigationDelegate, 
         // Our own cancels (a refusal, a new load over the old one) are not failures.
         let cancelled = (e.domain == NSURLErrorDomain && e.code == NSURLErrorCancelled)
             || (e.domain == "WebKitErrorDomain" && e.code == Self.frameLoadInterrupted)
+        Self.log.info("load failed: \(e.domain, privacy: .public) \(e.code, privacy: .public)")
         if !cancelled { show(message: e.localizedDescription) }
     }
 
@@ -210,12 +255,17 @@ final class BrowserPaneView: NSView, NSTextFieldDelegate, WKNavigationDelegate, 
 
     // MARK: NSTextFieldDelegate
 
+    func controlTextDidChange(_ notification: Notification) { barEdited = true }
+
+    func controlTextDidEndEditing(_ notification: Notification) { barEdited = false }
+
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
             submit(location.stringValue)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
+            barEdited = false
             location.stringValue = currentURL
             show(message: nil)
             focusContent()
