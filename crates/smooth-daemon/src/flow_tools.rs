@@ -42,7 +42,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use smooth_flow::protocol::CandidateSpec;
 use smooth_flow::vocab::{self, session_line, turn_progress, Turn};
-use smooth_flow::{Decision, Engine, NewRequest, ServerFrame, Session, SessionKind};
+use smooth_flow::{Decision, Engine, NewRequest, RemoteTarget, ServerFrame, Session, SessionKind};
 use smooth_operator::{Tool, ToolSchema};
 use tokio::sync::broadcast;
 
@@ -217,6 +217,8 @@ impl Verb {
                 "properties": {
                     "kind": { "type": "string", "description": "Harness to run: claude, codex, opencode, gemini, th-code, … (see `flow_harnesses`), or `shell`. Default claude." },
                     "directory": { "type": "string", "description": "Directory (git worktree) to run in. Find one with `flow_repos`. Default: inferred from the daemon's workspace." },
+                    "ssh_host": { "type": "string", "description": "Run on this machine over the system ssh instead of here: a ~/.ssh/config alias or [user@]host. Excludes directory and pearl_id. The harness must be installed there; state comes from reading the screen, and the remote program usually ends if the connection drops." },
+                    "remote_directory": { "type": "string", "description": "With ssh_host: the directory on that machine (~ is its home). Default: the remote login directory." },
                     "prompt": { "type": "string", "description": "First prompt for the agent. Omit to open it idle." },
                     "pearl_id": { "type": "string", "description": "Pearl id to attach. With no directory, the engine creates a worktree for it." },
                     "title": { "type": "string", "description": "Session title." },
@@ -448,6 +450,10 @@ struct NewArgs {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    ssh_host: Option<String>,
+    #[serde(default)]
+    remote_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -608,8 +614,11 @@ impl FlowTool {
     }
 
     async fn new_session(&self, a: NewArgs) -> Result<String> {
+        // Checked by the engine too; refused here before anything resolves.
+        let remote = a.ssh_host.as_deref().map(|h| RemoteTarget::new(h, a.remote_directory.as_deref())).transpose()?;
         let req = NewRequest {
             kind: kind_or_claude(a.kind.as_deref())?,
+            remote,
             worktree: a.directory.map(|d| self.ctx.resolve(&d).to_string_lossy().into_owned()),
             pearl_id: a.pearl_id,
             prompt: a.prompt,

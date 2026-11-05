@@ -33,6 +33,7 @@ dumb view.
 | CLI                                                        | `crates/smooth-cli/src/flow.rs` (`th flow …`)                                        |
 | Big Smooth's in-process `flow_*` tools (th-8b3918)         | `crates/smooth-daemon/src/flow_tools.rs` — see [fleet](#big-smooth-drives-the-fleet) |
 | Structured diffs, turn snapshots, hunk actions (th-26f5b9) | `crates/smooth-flow/src/diff/` — see [SmoothFlow-Diff.md](SmoothFlow-Diff.md)        |
+| Remote sessions over the system `ssh` (SMOODEV-4269)       | `crates/smooth-flow/src/remote.rs` — see [remote](#remote-sessions)                  |
 | Session store                                              | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)                                 |
 | tmux server                                                | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc)                          |
 
@@ -303,7 +304,8 @@ sessions(id TEXT PK,             -- "fs-" + 8 hex
          fan_out_id, created_at, updated_at, ended_at, exit_code, unread,
          tmux_socket,            -- the `tmux -L` server the session lives on (v0.1)
          state_source,           -- hooks | native | inferred (th-5c5457 / th-0f6126)
-         host)                   -- tmux | pty; NULL (older rows) = tmux (th-dc9822)
+         host,                   -- tmux | pty; NULL (older rows) = tmux (th-dc9822)
+         remote)                 -- JSON {host, cwd?} = runs over ssh; NULL = here (SMOODEV-4269)
 fan_outs(id TEXT PK, prompt, base_commit, pearl_id, created_at, winner_session_id)
 events(session_id, seq, at, kind, text, PK(session_id, seq))  -- last 200 per session (v0.1)
 config(key TEXT PK, value)      -- harness_prefs = {order, hidden} (th-0f6126)
@@ -1175,6 +1177,8 @@ same brand-new harness session into two rows.
    so TCC grants attribute to it. `th flow` connects; it never launches the
    daemon.
 7. Interrupted is not crashed: see [Restore](#restore).
+8. A remote session whose `ssh` exits 255 is never auto-resumed: see
+   [Remote sessions](#remote-sessions).
 
 ### Restore after an interruption (th-0937a1) {#restore}
 
@@ -1217,6 +1221,104 @@ that died with nothing saying it was interrupted still dies, as before.
 On the `pty` host, quitting the app leaves the sessions running (ADR-014), so
 after a quit they are re-adopted live and none of this runs. It is what brings
 them back after a reboot, and what brings tmux rows back after a quit.
+
+## Remote sessions (SMOODEV-4269) {#remote-sessions}
+
+A session can run on another machine: `th flow new --kind shell --ssh box`, the
+`ssh_host` argument of `flow_new`, or the SSH host field in the app's New Shell
+and New Session sheets. It is a row in the fleet like any other.
+
+**The design is the smallest one that works: the row's process is a local
+`ssh`.** The session host (or tmux) owns that `ssh`; the program runs on the far
+side. Nothing is installed on the remote machine and there is no new transport,
+so attach, input, replay, the relay and every client work unchanged, and phones
+see these rows with no change.
+
+- **The row's `argv` is what runs there.** `Engine::launch` wraps it with
+  `RemoteTarget::ssh_argv`, the one place `ssh` is spelled, so `resume_argv`
+  works as it does locally.
+- **The row:** `remote: {host, cwd?}`, `worktree: ""`, `project: "ssh://<host>"`
+  (the fleet groups under the host), `state_source: inferred`. A shell is titled
+  `box:/srv/app`; an agent takes its prompt or `claude · box`.
+- **The command:**
+  `ssh -t -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -- <host> [command]`.
+  A plain shell sends no command. A shell with a directory sends
+  `cd <dir> && exec "$SHELL" -l`. An agent sends
+  `exec "$SHELL" -lc '[cd <dir> && ]exec <argv>'`, so it starts with the remote
+  login `PATH`. Every word is POSIX-single-quoted, so a prompt can't reach the
+  remote shell as syntax.
+- **Why the system `ssh`:** `~/.ssh/config`, agents, `ProxyJump` and
+  `ControlMaster` all apply, and a password or 2FA prompt appears in the pane as
+  in any terminal. We never ask for `-A`, `-X` or `BatchMode`. A port goes in
+  `~/.ssh/config`: there is no port field.
+
+**Wire additions, all additive.** `flow.new` and `POST /api/flow/sessions` take
+`remote: {host, cwd?}`. `Session` carries `remote`, omitted when local. Older
+clients and engines see no change, and an older client shows the row with an
+empty worktree.
+
+### Survival, honestly
+
+The remote program lives as long as the **connection**, not as long as the row.
+SmoothFlow does not wrap it in anything on the far side. Run it under `tmux` or
+`screen` on that machine if it must outlive the connection.
+
+| What happens                                       | The `ssh`                       | The remote program                             | The row                                                                                          |
+| -------------------------------------------------- | ------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| App quits, or the daemon restarts (pty host)       | keeps running; re-adopted       | keeps running                                  | unchanged                                                                                        |
+| App quits (`SMOOTH_FLOW_HOST=tmux`)                | ends with the app's tmux server | usually ends (SIGHUP)                          | as the reboot row                                                                                |
+| Connection drops (seen within ~90 s by keepalives) | exits 255                       | usually ends (SIGHUP), once its `sshd` notices | shell: `dead`, `crashed` with the reason. Agent: `needs_you`, `restorable`, never auto-resumed   |
+| `ssh` can't connect or authenticate                | exits 255                       | never started                                  | same as a dropped connection                                                                     |
+| The remote program exits by itself                 | exits with its status           | ended                                          | ordinary [supervision](#supervision-rules): `done` on 0, an agent resumes, a shell is `dead`     |
+| This Mac reboots or the session host dies          | gone                            | usually ends (SIGHUP)                          | shell: a new `ssh` and a fresh shell in its starting directory. Agent: `needs_you`, `restorable` |
+| Kill                                               | ended                           | usually ends (SIGHUP)                          | `done`                                                                                           |
+| Remote machine reboots                             | exits 255 within ~90 s          | gone                                           | as a dropped connection                                                                          |
+
+- **Why a lost agent is never auto-resumed.** The remote program may still be
+  running until `sshd` notices, and a second one would write to the same
+  conversation. Nothing on this side can check. So it waits, and Kill & Resume
+  (labelled Reconnect on a remote row) reconnects with its resume command.
+- **A dead shell row stays dead** (terminal states are sticky). Its menu offers
+  New Shell on `box`: a new session, not the old one back.
+- **A remote shell reopens in its starting directory**, not where it had `cd`'d:
+  the engine can't read the far side's cwd.
+- **Exit 255 is ambiguous.** A remote program may exit 255 itself. The row then
+  says the connection may have dropped; the worst case is an agent waiting for a
+  resume it didn't strictly need.
+
+### Security
+
+- **Argument injection:** `RemoteTarget::new` refuses a host that starts with
+  `-`, also after `user@`, and allows only ASCII letters, digits and `. _ - @ : %`
+  (no shell metacharacters, spaces or URLs). The engine checks at `flow.new` and
+  again at every launch, so a forged row fails too. `--` before the host is the
+  second lock. The app runs the same check to explain itself; the engine is the
+  authority.
+- **Credentials:** a `user:password@host` value is refused and the error does
+  not echo it. `flow.db`, the title and the logs hold only the validated host. A
+  password typed at a prompt goes to the PTY like all input. No agent forwarding.
+  The hosts offered as Recent in the app are validated names only.
+- **No local secrets go across.** The child gets `TERM=xterm-256color` and
+  `PATH`, and no hook token or hook URL: SmoothFlow's hooks aren't on the far side.
+
+### Limits
+
+- **State is read from the screen** (`inferred`). With no hooks there are no
+  approvals in the Inbox: answer prompts in the pane. `th-code` needs a local
+  daemon to report to, so it is refused.
+- **Refused with `remote`:** `pearl_id`, `worktree`, `project`, fan-out. Worktrees
+  and pearls are local concepts. Diff and PR are disabled and `flow.diff` refuses,
+  because the code isn't here.
+- **Not sampled:** autotitle and shell cwd tracking skip remote rows, and pre-warm
+  is a no-op. A split of a remote pane (`cwd_of`) opens a new `ssh` to the same
+  host and starting directory.
+- **The remote login shell must be POSIX-like.** `csh`/`tcsh` can't run the `cd`
+  and agent commands; a plain shell with no directory works anywhere.
+- **Our keepalive overrides `~/.ssh/config`'s** for these sessions.
+- **Creating one:** the Mac app, `th flow` and the `flow_*` tools. Phones and the
+  desktop client show, attach to and steer these rows but have no create UI yet.
+- **Not built:** wrapping the remote program in remote `tmux` so it survives a
+  dropped connection. It would need remote state and is a separate decision.
 
 ## Fan-out
 

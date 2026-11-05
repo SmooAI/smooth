@@ -158,6 +158,48 @@ struct DirectoryField: View {
     }
 }
 
+/// "On another machine" (SMOODEV-4269): a host, the directory there, and what
+/// happens to the session when the connection goes. An empty host means here.
+struct RemoteFields: View {
+    @Binding var host: String
+    @Binding var directory: String
+    @State private var recent = RecentHosts.load()
+
+    private var isRemote: Bool { !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "network").foregroundStyle(Color(Theme.muted))
+                TextField("SSH host (optional): a ~/.ssh/config alias or user@host", text: $host)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .accessibilityIdentifier("newsession.ssh.host")
+                if !recent.isEmpty {
+                    Menu("Recent") {
+                        ForEach(recent, id: \.self) { h in Button(h) { host = h } }
+                    }
+                    .fixedSize()
+                }
+            }
+            if isRemote {
+                if let problem = RemoteTarget.problem(host) {
+                    Text(problem).font(.caption).foregroundStyle(Color(Theme.amber)).accessibilityIdentifier("newsession.ssh.problem")
+                }
+                TextField("Directory on that machine (optional, ~ is its home)", text: $directory)
+                    .textFieldStyle(.roundedBorder)
+                    .font(Theme.mono(.body))
+                    .accessibilityIdentifier("newsession.ssh.directory")
+                Text(RemoteTarget.survivalNote)
+                    .font(.caption)
+                    .foregroundStyle(Color(Theme.muted))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("newsession.ssh.survival")
+            }
+        }
+    }
+}
+
 /// New Shell in Directory… (SMOODEV-4111): the same directory field as the
 /// agent dialog — search your repos, paste a path, or Browse… — and nothing
 /// else. Start opens a shell there in a new tab; the pick is remembered as
@@ -165,8 +207,13 @@ struct DirectoryField: View {
 struct NewShellSheet: View {
     @ObservedObject var app: AppController
     var start: (String) -> Void
+    var startRemote: (RemoteTarget) -> Void = { _ in }
     var dismiss: () -> Void = {}
     @State private var directory = ""
+    @State private var sshHost = ""
+    @State private var remoteDirectory = ""
+
+    private var isRemote: Bool { !sshHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private var current: String {
         LastDirectory.load().flatMap { ShellLaunch.isDirectory($0) ? $0 : nil } ?? FileManager.default.homeDirectoryForCurrentUser.path
@@ -175,17 +222,25 @@ struct NewShellSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New shell in directory").font(.title3.bold())
-            DirectoryField(app: app, chosen: $directory, current: current) { _ in }
+            if !isRemote { DirectoryField(app: app, chosen: $directory, current: current) { _ in } }
+            RemoteFields(host: $sshHost, directory: $remoteDirectory)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Open Shell") {
+                    if isRemote {
+                        guard let target = RemoteTarget.from(host: sshHost, cwd: remoteDirectory) else { return }
+                        dismiss()
+                        startRemote(target)
+                        return
+                    }
                     let dir = directory.nilIfEmpty ?? current
                     LastDirectory.remember(dir)
                     dismiss()
                     start(dir)
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(isRemote && RemoteTarget.problem(sshHost) != nil)
                 .accessibilityIdentifier("newshell.start")
             }
         }
@@ -208,17 +263,31 @@ struct NewSessionSheet: View {
     @State private var directory = ""
     @State private var pearlId = ""
     @State private var title = ""
+    @State private var sshHost = ""
+    @State private var remoteDirectory = ""
     var dismiss: () -> Void = {}
 
     private var selected: HarnessInfo? { app.store.harnesses.first { $0.name == kind } }
-    private var launchable: Bool { kind == "shell" || selected?.installed == true }
+    private var isRemote: Bool { !sshHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// A remote harness is installed there, which only starting it can tell.
+    private var launchable: Bool {
+        if isRemote { return RemoteTarget.problem(sshHost) == nil && selected?.stateSource != "native" }
+        return kind == "shell" || selected?.installed == true
+    }
     private var context: InferredContext? { app.inferred }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New session").font(.title3.bold())
             HarnessPicker(store: app.store, kind: $kind)
-            if let h = selected, !h.installed {
+            if isRemote {
+                if selected?.stateSource == "native" {
+                    Text("\(selected?.displayName ?? kind) reports to a local daemon, so it can't run over SSH yet").font(.caption).foregroundStyle(Color(Theme.amber))
+                } else if kind != "shell" {
+                    Text("It must be installed on that machine. SmoothFlow reads its state from the screen, so there are no approval prompts in the Inbox.")
+                        .font(.caption).foregroundStyle(Color(Theme.muted))
+                }
+            } else if let h = selected, !h.installed {
                 Text(h.reason ?? "not installed").font(.caption).foregroundStyle(Color(Theme.muted))
                 if let fix = h.health?.fix { HarnessFixLine(fix: fix) }
             } else if let h = selected, h.isDegraded, let health = h.health {
@@ -228,14 +297,19 @@ struct NewSessionSheet: View {
             } else if let h = selected, h.stateSource == "native" {
                 Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
             }
-            DirectoryField(app: app, chosen: $directory, current: context?.worktree ?? "") { path in
-                Task { await app.loadInference(cwd: path) }
+            if !isRemote {
+                DirectoryField(app: app, chosen: $directory, current: context?.worktree ?? "") { path in
+                    Task { await app.loadInference(cwd: path) }
+                }
+                inferredContext
             }
-            inferredContext
+            RemoteFields(host: $sshHost, directory: $remoteDirectory)
             TextField("Prompt (optional)", text: $prompt, axis: .vertical).lineLimit(3...6)
             DisclosureGroup("Override context", isExpanded: $showOverrides) {
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("Pearl id (th-xxxxxx) — with no worktree, the engine creates one", text: $pearlId).font(Theme.mono(.body))
+                    if !isRemote {
+                        TextField("Pearl id (th-xxxxxx) — with no worktree, the engine creates one", text: $pearlId).font(Theme.mono(.body))
+                    }
                     TextField("Title", text: $title)
                 }.padding(.top, 6)
             }
@@ -275,6 +349,12 @@ struct NewSessionSheet: View {
     /// An override wins; otherwise the inferred value goes on the wire, so the
     /// session records exactly the context the dialog showed.
     private func start() {
+        if isRemote {
+            guard let target = RemoteTarget.from(host: sshHost, cwd: remoteDirectory) else { return }
+            app.newSession(NewSession(kind: kind, prompt: prompt.nilIfEmpty, title: title.nilIfEmpty, remote: target))
+            dismiss()
+            return
+        }
         let c = context
         app.newSession(NewSession(
             kind: kind,

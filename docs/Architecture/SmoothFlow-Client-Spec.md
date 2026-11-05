@@ -399,6 +399,12 @@ control.
   Mac app keeps ⌘D / ⌘⇧D as extra, Mac-only alias rows). `flow.new` gains the
   additive `cwd_of`. Only `keymap.json`'s Mac table changes; Linux / Windows
   defaults are unchanged.
+- 2026-11-05: `Session` gains the additive `remote: {host, cwd?}` and `flow.new`
+  accepts it (SMOODEV-4269). A remote row has an empty `worktree` and a
+  `ssh://<host>` project; show the host, and don't offer local-directory actions.
+  A client that ignores the field keeps working. Attention `restorable` needs a
+  Resume action (`flow.kill {resume: true}`). See
+  [Remote sessions](SmoothFlow.md#remote-sessions).
 - 2026-10-23: Rename Tab (SMOODEV-4127) is ⌘⇧R on the Mac and Ctrl+Shift+Alt+R
   elsewhere. Its wire frame is `flow.rename {id, title?}`, where a blank title
   resets the name. Rows carry an additive `title_pinned`. §5 tab titles now

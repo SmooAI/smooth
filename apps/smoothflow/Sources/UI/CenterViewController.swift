@@ -298,6 +298,13 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         launchShell(tab: t.id, pane: t.focused, source: nil, picked: directory)
     }
 
+    /// New Shell in Directory… with a host (SMOODEV-4269): over ssh, in a new tab.
+    func newShell(on target: RemoteTarget) {
+        newTab(empty: true)
+        guard let t = activeTab else { return }
+        launchShell(tab: t.id, pane: t.focused, source: nil, picked: nil, remote: target)
+    }
+
     /// Panes waiting on a shell the engine is still starting.
     private var launching: Set<PaneID> = []
 
@@ -305,12 +312,12 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     /// arrives — by the id the engine answered with, so another client's new
     /// session can never land here instead. If the pane was closed, or
     /// filled from the sidebar meanwhile, the shell just stays in the fleet.
-    private func launchShell(tab tabId: Int, pane: PaneID, source: Session?, picked: String?) {
+    private func launchShell(tab tabId: Int, pane: PaneID, source: Session?, picked: String?, remote: RemoteTarget? = nil) {
         launching.insert(pane)
         renderTabs()
         Task { [weak self] in
             guard let self else { return }
-            let made = await self.app.openShell(source: source, picked: picked)
+            let made = await self.app.openShell(source: source, picked: picked, remote: remote)
             self.launching.remove(pane)
             guard let made, let i = self.surfaceTabs.firstIndex(where: { $0.id == tabId }),
                   self.surfaceTabs[i].root.contains(pane), self.surfaceTabs[i].sessions[pane] == nil else {
@@ -518,7 +525,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             t.sessions[t.focused] = id
         }
         replaceActiveTab(t)
-        pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))"
+        pathLabel.stringValue = "\(s.whereItRuns(reportedPwd: nil)) · \(s.argv.joined(separator: " "))"
         refreshTabGate()
         if tab == .diff {
             diffView.show(session: s)
@@ -535,7 +542,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         }
         // argv changes under a session (`claude --resume …` after a kill/resume).
         // The directory is where the terminal says it is, when it has said.
-        if let s = app.store.focused { pathLabel.stringValue = "\(app.reportedPwd(s.id) ?? s.worktree) · \(s.argv.joined(separator: " "))" }
+        if let s = app.store.focused { pathLabel.stringValue = "\(s.whereItRuns(reportedPwd: app.reportedPwd(s.id))) · \(s.argv.joined(separator: " "))" }
         refreshTabGate()
     }
 

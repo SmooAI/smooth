@@ -344,6 +344,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     func dismissCloseRefusal(_ id: String) { closeRefusals[id] = nil }
     func newSession(_ n: NewSession) {
         LastDirectory.remember(n.worktree)
+        if let host = n.remote?.host { RecentHosts.remember(host) }
         client.send(.new(n))
     }
 
@@ -353,8 +354,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// it once the engine has made it, so the caller can put it in the pane
     /// that asked. `source` is the session whose live cwd it opens in;
     /// `picked` a directory the user chose. See `ShellLaunch.request`.
-    func openShell(source: Session?, picked: String? = nil) async -> Session? {
-        let req = ShellLaunch.request(source: source, picked: picked, last: LastDirectory.load(),
+    func openShell(source: Session?, picked: String? = nil, remote: RemoteTarget? = nil) async -> Session? {
+        if let host = remote?.host { RecentHosts.remember(host) }
+        let req = ShellLaunch.request(source: source, picked: picked, remote: remote, last: LastDirectory.load(),
                                       home: FileManager.default.homeDirectoryForCurrentUser.path)
         let t0 = ContinuousClock.now
         do {
@@ -507,7 +509,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// there in a new tab. The pick becomes the next ⌘N's fallback.
     func showNewShellInDirectory() {
         mainWindow.contentViewController?.presentSheet { dismiss in
-            NewShellSheet(app: self, start: { dir in self.mainWindow?.center.newShell(in: dir) }, dismiss: dismiss)
+            NewShellSheet(app: self,
+                          start: { dir in self.mainWindow?.center.newShell(in: dir) },
+                          startRemote: { target in self.mainWindow?.center.newShell(on: target) },
+                          dismiss: dismiss)
         }
     }
 

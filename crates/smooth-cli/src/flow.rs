@@ -49,6 +49,15 @@ pub enum FlowCommands {
         /// Pearl to work (creates a worktree when --worktree is absent).
         #[arg(long)]
         pearl: Option<String>,
+        /// Run on another machine over the system `ssh`: a ~/.ssh/config alias
+        /// or `[user@]host`. A harness must be installed there. The remote
+        /// program usually ends if the connection drops, unless you start it
+        /// under tmux yourself; state comes from reading the screen.
+        #[arg(long, value_name = "HOST", conflicts_with_all = ["worktree", "project", "pearl"])]
+        ssh: Option<String>,
+        /// With --ssh: the directory on that machine (`~` is its home).
+        #[arg(long, value_name = "DIR", requires = "ssh")]
+        remote_cwd: Option<String>,
         /// Initial prompt for an agent kind.
         #[arg(long)]
         prompt: Option<String>,
@@ -451,8 +460,19 @@ fn print_sessions(sessions: &[Value]) {
             pad(&state, width, 16),
             paint(&format!("{via:<9}"), |v| v.dimmed().to_string()),
             short(&g("title"), 33),
-            paint(&short(&g("worktree"), 48), |w| w.dimmed().to_string())
+            paint(&short(&where_it_runs(s), 48), |w| w.dimmed().to_string())
         );
+    }
+}
+
+/// `th flow ls`'s last column: the worktree, or `ssh box:~/api` for a remote row.
+fn where_it_runs(s: &Value) -> String {
+    let Some(host) = s.pointer("/remote/host").and_then(Value::as_str) else {
+        return s.get("worktree").and_then(Value::as_str).unwrap_or("").to_string();
+    };
+    match s.pointer("/remote/cwd").and_then(Value::as_str) {
+        Some(cwd) => format!("ssh {host}:{cwd}"),
+        None => format!("ssh {host}"),
     }
 }
 
@@ -511,6 +531,8 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             worktree,
             project,
             pearl,
+            ssh,
+            remote_cwd,
             prompt,
             model,
             title,
@@ -524,6 +546,8 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
                 worktree,
                 project,
                 pearl,
+                ssh,
+                remote_cwd,
                 prompt,
                 model,
                 title,
@@ -769,6 +793,8 @@ struct NewArgs {
     worktree: Option<String>,
     project: Option<String>,
     pearl: Option<String>,
+    ssh: Option<String>,
+    remote_cwd: Option<String>,
     prompt: Option<String>,
     model: Option<String>,
     title: Option<String>,
@@ -776,6 +802,30 @@ struct NewArgs {
     attach: bool,
     json: bool,
     argv: Vec<String>,
+}
+
+/// `flow.new`'s body. A remote session has no local directory, so `th flow new
+/// --ssh` must not pick up this shell's cwd the way a local one does.
+fn new_body(a: &NewArgs) -> Value {
+    let worktree = match (&a.worktree, &a.pearl, &a.ssh) {
+        (None, None, None) => std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
+        _ => a.worktree.clone(),
+    };
+    let mut body = json!({
+        "kind": a.kind,
+        "worktree": worktree,
+        "project": a.project,
+        "pearl_id": a.pearl,
+        "prompt": a.prompt,
+        "model": a.model,
+        "title": a.title,
+        "tmux_socket": a.tmux_socket,
+        "argv": if a.argv.is_empty() { Value::Null } else { json!(a.argv) },
+    });
+    if let Some(host) = &a.ssh {
+        body["remote"] = json!({ "host": host, "cwd": a.remote_cwd });
+    }
+    body
 }
 
 /// `th flow infer` — the read-only context the New Session dialog shows.
@@ -856,37 +906,11 @@ fn urlencoding(s: &str) -> String {
 }
 
 async fn cmd_new(a: NewArgs) -> Result<()> {
-    let NewArgs {
-        kind,
-        worktree,
-        project,
-        pearl,
-        prompt,
-        model,
-        title,
-        tmux_socket,
-        attach,
-        json,
-        argv,
-    } = a;
     // th-c103c1: `th flow new` with no arguments starts a session HERE. The
     // engine infers the pearl, branch and title from the worktree; only
     // `--pearl` (which asks it to CREATE a worktree) opts out.
-    let worktree = match (&worktree, &pearl) {
-        (None, None) => std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
-        _ => worktree,
-    };
-    let body = json!({
-        "kind": kind,
-        "worktree": worktree,
-        "project": project,
-        "pearl_id": pearl,
-        "prompt": prompt,
-        "model": model,
-        "title": title,
-        "tmux_socket": tmux_socket,
-        "argv": if argv.is_empty() { Value::Null } else { json!(argv) },
-    });
+    let body = new_body(&a);
+    let NewArgs { attach, json, .. } = a;
     let v = call(reqwest::Method::POST, "/api/flow/sessions", Some(body)).await?;
     let id = v.pointer("/session/id").and_then(Value::as_str).unwrap_or("").to_string();
     emit(json, &v, |v| {
@@ -1070,6 +1094,82 @@ async fn attach_session(id: &str) -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
+    use clap::Parser as _;
+    use serde_json::json;
+
+    use super::{new_body, where_it_runs, FlowCommands, NewArgs};
+
+    #[test]
+    fn flow_ls_says_where_a_session_runs() {
+        assert_eq!(where_it_runs(&json!({ "worktree": "/w" })), "/w");
+        assert_eq!(where_it_runs(&json!({ "worktree": "", "remote": { "host": "box" } })), "ssh box");
+        assert_eq!(
+            where_it_runs(&json!({ "worktree": "", "remote": { "host": "box", "cwd": "~/a" } })),
+            "ssh box:~/a"
+        );
+    }
+
+    /// Parses `th flow new <args>` the way the binary would.
+    fn parse_new(args: &[&str]) -> std::result::Result<FlowCommands, clap::Error> {
+        #[derive(clap::Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: FlowCommands,
+        }
+        let mut v = vec!["th", "new"];
+        v.extend_from_slice(args);
+        T::try_parse_from(v).map(|t| t.cmd)
+    }
+
+    fn new_args(ssh: Option<&str>, remote_cwd: Option<&str>) -> NewArgs {
+        NewArgs {
+            kind: "shell".into(),
+            worktree: None,
+            project: None,
+            pearl: None,
+            ssh: ssh.map(str::to_string),
+            remote_cwd: remote_cwd.map(str::to_string),
+            prompt: None,
+            model: None,
+            title: None,
+            tmux_socket: None,
+            attach: false,
+            json: false,
+            argv: vec![],
+        }
+    }
+
+    #[test]
+    fn flow_new_ssh_goes_on_the_wire_without_a_local_directory() {
+        let body = new_body(&new_args(Some("box"), Some("~/api")));
+        assert_eq!(body["remote"], json!({ "host": "box", "cwd": "~/api" }));
+        assert!(body["worktree"].is_null(), "this shell's cwd means nothing on the remote host");
+    }
+
+    #[test]
+    fn flow_new_without_ssh_keeps_the_current_directory_and_sends_no_remote() {
+        let body = new_body(&new_args(None, None));
+        assert!(body.get("remote").is_none(), "older daemons see the frame unchanged");
+        assert!(body["worktree"].is_string());
+    }
+
+    #[test]
+    fn flow_new_ssh_flags_parse_and_conflict() {
+        assert!(matches!(
+            parse_new(&["--ssh", "box", "--remote-cwd", "/srv"]).unwrap(),
+            FlowCommands::New { ssh: Some(h), remote_cwd: Some(c), .. } if h == "box" && c == "/srv"
+        ));
+        assert!(parse_new(&["--remote-cwd", "/srv"]).is_err(), "--remote-cwd needs --ssh");
+        for other in ["--worktree", "--project", "--pearl"] {
+            assert!(parse_new(&["--ssh", "box", other, "x"]).is_err(), "{other} is local");
+        }
+    }
+
+    /// clap stops the bare form; the engine refuses the `=` form (engine tests).
+    #[test]
+    fn flow_new_ssh_does_not_swallow_an_option_as_a_host() {
+        assert!(parse_new(&["--ssh", "-oProxyCommand=x"]).is_err());
+    }
 
     /// th-1efb59: the skill is a real skill (frontmatter an agent's loader
     /// accepts) and names every flow MCP tool, so a new tool can't ship

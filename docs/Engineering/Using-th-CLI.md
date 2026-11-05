@@ -2051,6 +2051,8 @@ th flow new --kind claude --prompt "fix the flaky test"  # pre-assigned --sessio
 th flow new --kind claude --pearl th-abc123 --prompt "…" # creates ../<repo>-th-abc123-<slug> first
 th flow new --kind shell --worktree ../some-worktree     # a login shell in that dir
 th flow new --kind claude --attach -- claude --model opus # explicit argv after `--`
+th flow new --kind shell --ssh box --attach              # a shell on another machine, over the system ssh
+th flow new --kind claude --ssh me@box --remote-cwd ~/api --prompt "…" # an agent there; it must be installed there
 th flow new --kind claude --tmux-socket smoothflow       # on the SmoothFlow app's tmux server (its TCC grants)
 th flow new --kind opencode --prompt "…"                 # opencode --prompt; resumes with --session <id> once its plugin reported the id
 th flow new --kind codex --prompt "…"                    # codex <prompt>; state is scraped (VIA inferred) until ~/.codex/hooks.json posts hooks
