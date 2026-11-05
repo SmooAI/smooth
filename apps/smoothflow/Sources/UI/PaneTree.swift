@@ -187,6 +187,9 @@ struct SurfaceTab: Identifiable, Equatable, Sendable {
     var zoomed: PaneID?
     /// Which session each pane shows. A pane with no entry is empty.
     var sessions: [PaneID: String] = [:]
+    /// Which panes are browser panes, and the URL each shows ("" until the
+    /// first page). A pane is a browser or shows a session, never both.
+    var browsers: [PaneID: String] = [:]
 
     init(id: Int, pane: PaneID) {
         self.id = id
@@ -198,6 +201,7 @@ struct SurfaceTab: Identifiable, Equatable, Sendable {
 
     /// The tab strip's label: the focused pane's session, or the pane count.
     func title(sessionTitle: (String) -> String?) -> String {
+        if let url = browsers[focused] { return BrowserURL.title(for: url) }
         if let sid = sessions[focused], let t = sessionTitle(sid) { return t }
         return panes.count > 1 ? "\(panes.count) panes" : "empty"
     }
@@ -228,8 +232,38 @@ struct SurfaceTab: Identifiable, Equatable, Sendable {
         guard let root2 = root.removing(gone) else { return false }
         root = root2
         sessions.removeValue(forKey: gone)
+        browsers.removeValue(forKey: gone)
         focused = root.contains(next) ? next : (root.leaves.first ?? next)
         if zoomed == gone { zoomed = nil }
+        return true
+    }
+
+    /// Make a browser pane showing `url` and focus it: the focused pane when
+    /// it is empty and free (`busy` is a shell on its way into it), else a new
+    /// split to its right.
+    @discardableResult
+    mutating func openBrowser(url: String, busy: Bool = false) -> PaneID {
+        let empty = sessions[focused] == nil && browsers[focused] == nil && !busy
+        let pane = empty ? focused : split(.right)
+        sessions[pane] = nil
+        browsers[pane] = url
+        zoomed = nil
+        return pane
+    }
+
+    /// Show a session here. A browser pane is never overwritten: with one
+    /// focused, the session goes to the first terminal pane, or a new split if
+    /// the tab is all browsers. False when it was already the focused pane.
+    mutating func place(session id: String) -> Bool {
+        if let existing = panes.first(where: { sessions[$0] == id }) {
+            guard focused != existing else { return false }
+            focused = existing
+            return true
+        }
+        if browsers[focused] != nil {
+            focused = panes.first { browsers[$0] == nil } ?? split(.right)
+        }
+        sessions[focused] = id
         return true
     }
 

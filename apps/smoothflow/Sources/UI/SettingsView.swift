@@ -141,6 +141,7 @@ struct TerminalPane: View {
     /// Mirrors `PaneCloseSettings` so the toggle redraws — the value itself
     /// lives in UserDefaults, because the alert writes it too.
     @State private var confirmClosePane = PaneCloseSettings.confirm()
+    @State private var opensLinksInPane = BrowserSettings.opensTerminalLinks()
     @State private var families = TerminalFont.availableFamilies()
     private let userKeys = TerminalFont.readUserConfigKeys()
 
@@ -164,6 +165,10 @@ struct TerminalPane: View {
             Toggle("Confirm before ⌘W closes a pane holding a live session", isOn: confirmClose)
                 .accessibilityIdentifier("settings.terminal.confirmClosePane")
             Text("Off, ⌘W closes the pane immediately and never ends a session — the session keeps running and stays in the sidebar. This is the switch behind the alert's “Don’t ask again”.")
+                .font(.caption).foregroundStyle(Color(Theme.muted))
+            Toggle("Open ⌘-clicked web links in a browser pane", isOn: linksInPane)
+                .accessibilityIdentifier("settings.terminal.linksInPane")
+            Text("Off, they open in your default browser. Mail links, files and other kinds of link always open outside SmoothFlow.")
                 .font(.caption).foregroundStyle(Color(Theme.muted))
             if userKeys.contains("font-family"), settings.family == nil {
                 Text("Your Ghostty config sets font-family, so the panes follow it. Pick a font above to override just SmoothFlow.")
@@ -194,6 +199,10 @@ struct TerminalPane: View {
 
     private var confirmClose: Binding<Bool> {
         Binding(get: { PaneCloseSettings.confirm() }, set: { PaneCloseSettings.setConfirm($0); confirmClosePane = $0 })
+    }
+
+    private var linksInPane: Binding<Bool> {
+        Binding(get: { opensLinksInPane }, set: { BrowserSettings.setOpensTerminalLinks($0); opensLinksInPane = $0 })
     }
 
     private func apply() {

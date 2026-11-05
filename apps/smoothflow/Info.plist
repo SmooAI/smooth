@@ -53,6 +53,14 @@
     <string>SmoothFlow lets Smooth read and manage your reminders.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>SmoothFlow controls Messages and other apps on your behalf when an agent needs to.</string>
+    <!-- The browser pane (SMOODEV-4270) must reach plain http: dev servers and
+         internal hosts. This exempts WKWebView only; every other connection the
+         app makes keeps App Transport Security's defaults. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+    </dict>
     <key>NSUserNotificationsUsageDescription</key>
     <string>SmoothFlow notifies you when an agent needs you.</string>
     <!-- Sparkle OTA (docs/Architecture/SmoothFlow-macOS.md "Release and OTA").

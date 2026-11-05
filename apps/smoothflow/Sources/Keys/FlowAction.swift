@@ -62,6 +62,13 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case findNext
     case findPrevious
 
+    // Browser pane (SMOODEV-4270)
+    case openBrowser
+    case browserLocation
+    case browserBack
+    case browserForward
+    case browserReload
+
     // Diff viewer (th-26f5b9). Bare keys, live only while the Diff tab has
     // focus — never menu items (see `isViewScoped`). The table is the Client
     // Spec's §14 key list (`spec/vectors/diff.json`).
@@ -85,6 +92,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case splits = "Splits"
         case view = "View"
         case terminal = "Terminal"
+        case browser = "Browser"
         case diff = "Diff Viewer"
         var id: String { rawValue }
     }
@@ -97,6 +105,15 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     /// A second binding of another action: it keeps a (hidden) menu item so
     /// its chord works, but the menu lists the action once.
     var isAlias: Bool { self == .splitRightAlias || self == .splitDownAlias }
+
+    /// Acts on the focused browser pane. Off one, its menu item is disabled and
+    /// a terminal does not claim its chord, so the key reaches the terminal.
+    var needsFocusedBrowser: Bool {
+        switch self {
+        case .browserLocation, .browserBack, .browserForward, .browserReload: true
+        default: false
+        }
+    }
 
     /// The Client Spec's name for a diff action (`spec/vectors/diff.json`).
     var diffSpecName: String? {
@@ -132,6 +149,8 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
             .view
         case .find, .findNext, .findPrevious:
             .terminal
+        case .openBrowser, .browserLocation, .browserBack, .browserForward, .browserReload:
+            .browser
         case .diffNextLine, .diffPreviousLine, .diffNextHunk, .diffPreviousHunk, .diffNextFile, .diffPreviousFile,
              .diffToggleViewed, .diffComment, .diffRevertHunk, .diffStageHunk, .diffToggleSplit:
             .diff
@@ -183,6 +202,11 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .find: return "Find…"
         case .findNext: return "Find Next"
         case .findPrevious: return "Find Previous"
+        case .openBrowser: return "New Browser Pane"
+        case .browserLocation: return "Open Location…"
+        case .browserBack: return "Back"
+        case .browserForward: return "Forward"
+        case .browserReload: return "Reload Page"
         case .diffNextLine: return "Next Line"
         case .diffPreviousLine: return "Previous Line"
         case .diffNextHunk: return "Next Hunk"
@@ -280,6 +304,12 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .findNext: return KeyChord("g", command: true)
         case .findPrevious: return KeyChord("g", command: true, shift: true)
 
+        case .openBrowser: return KeyChord("l", command: true, shift: true)
+        case .browserLocation: return KeyChord("l", command: true)
+        case .browserBack: return KeyChord("[", command: true)
+        case .browserForward: return KeyChord("]", command: true)
+        case .browserReload: return KeyChord("r", command: true)
+
         case .diffNextLine: return KeyChord("j")
         case .diffPreviousLine: return KeyChord("k")
         case .diffNextHunk: return KeyChord("n")
@@ -315,6 +345,8 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .steerAll: return "Sends the steer bar's text to every working session."
         case .zoomPane: return "The focused pane fills the tab; again restores the layout."
         case .equalizePanes: return "Resets every divider in the focused tab to an even split."
+        case .openBrowser: return "A web page beside the focused pane, or in it if that pane is empty."
+        case .browserLocation, .browserBack, .browserForward, .browserReload: return "Browser pane only. Elsewhere the chord goes to the terminal."
         case .diffComment: return "Diff tab only. Comments on the selected line or range; Send Review delivers them all to the agent as one message."
         case .diffRevertHunk: return "Diff tab only. Asks first, then undoes the selected hunk in the worktree."
         case .diffStageHunk: return "Diff tab only, Uncommitted view. Stages (or unstages) the selected hunk."

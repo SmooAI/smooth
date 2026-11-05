@@ -229,6 +229,17 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// focus call cannot attach a session by accident.
     func surfaceIfLoaded(_ id: String) -> TerminalSurfaceView? { surfaces[id] }
 
+    /// A ⌘-clicked terminal link, already judged by `TerminalLink`: a web page
+    /// opens in a browser pane unless Settings says otherwise, and everything
+    /// else keeps `TerminalLink.perform`'s handling.
+    private func performLink(_ target: TerminalLink.Target) {
+        if let center = mainWindow?.center, let url = BrowserURL.paneLink(for: target, enabled: BrowserSettings.opensTerminalLinks()) {
+            center.openLink(url)
+        } else {
+            TerminalLink.perform(target)
+        }
+    }
+
     func surface(for id: String) -> TerminalSurfaceView {
         if let v = surfaces[id] { return v }
         let v = TerminalSurfaceView(sessionId: id, mirrorsReplies: store.sessions[id]?.hostAnswersQueries ?? false)
@@ -245,6 +256,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
         v.fallbackDirectory = { [weak self] in self?.store.sessions[id]?.worktree }
+        v.performLink = { [weak self] in self?.performLink($0) }
         v.onPwd = { [weak self] _ in
             self?.mainWindow?.center.refreshHeaders()
             if self?.store.focusedId == id { self?.prewarmNextShell() }

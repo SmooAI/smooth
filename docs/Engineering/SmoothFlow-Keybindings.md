@@ -222,7 +222,8 @@ Terminal output is untrusted, so `TerminalLink.resolve` limits what a click does
 
 | Link                                          | ⌘-click                    |
 | --------------------------------------------- | -------------------------- |
-| `http`, `https`, `mailto`, `ftp`, `ssh`       | opens                      |
+| `http`, `https`                               | opens in a browser pane    |
+| `mailto`, `ftp`, `ssh`                        | opens in its default app   |
 | any other URL scheme                          | refused, with a beep       |
 | a file or folder                              | opens in its default app   |
 | an executable, `.app`, `.command` and similar | shown in Finder, never run |
@@ -230,7 +231,14 @@ Terminal output is untrusted, so `TerminalLink.resolve` limits what a click does
 
 Relative paths resolve against the directory the program announced (OSC 7), else
 the session's worktree. A trailing `:12:3` is dropped when the path with it does
-not exist.
+not exist. With Settings ▸ Terminal ▸ _Open ⌘-clicked web links in a browser pane_
+off, web links open in the default browser.
+
+**⌘⇧L opens a browser pane** ([SmoothFlow-macOS § Browser pane](../Architecture/SmoothFlow-macOS.md#browser-pane-smoodev-4270)).
+⌘L goes to its URL bar, ⌘[ and ⌘] go back and forward, and ⌘R reloads, as in cmux
+and Safari. Those four are live only in a browser pane. Elsewhere their menu items
+are disabled and a terminal does not claim the chord, so the key reaches the
+program in the terminal.
 
 **⌘⇧P is the command palette.** It searches sessions and actions. Its actions come
 from `FlowAction`, so a new action appears there by itself and a rebound chord
@@ -262,6 +270,11 @@ or clicking elsewhere closes it.
   libghostty surface (counts, walking matches, Esc handing back the keyboard).
 - `Tests/TerminalLinkTests.swift` — what a click may open, and ⌘-click end to end
   through libghostty for a URL and a file path.
+- `Tests/BrowserPaneTests.swift` — what the URL bar accepts, the tab model and saved
+  layout, and a real web view against a loopback server (http loads, history, no
+  bridge, refused navigation).
+- `UITests/BrowserUITests.swift` — ⌘⇧L beside a terminal, refused schemes, the
+  sidebar leaving a page alone, ⌘W, and the page coming back after a relaunch.
 - `Tests/CommandPaletteTests.swift` — the listed actions, ranking, and the window's
   keyboard handling.
 - `UITests/LayoutUITests.swift` — the real app against the mock fleet: ⌘⇧

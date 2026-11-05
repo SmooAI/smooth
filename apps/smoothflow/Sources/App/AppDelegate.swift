@@ -2,7 +2,7 @@ import AppKit
 import Sparkle
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let palette = CommandPaletteController()
     let app = AppController()
     /// Sparkle OTA. Feed + key live in Info.plist (SUFeedURL / SUPublicEDKey);
@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Ghostty's (SMOODEV-4111): ⌘⇧↑/↓ split, they do not jump to a prompt.
         TerminalSurfaceView.appShortcut = { [weak self] event in
             guard let self, let chord = KeyChord.from(event: event), let action = self.app.keymap.appAction(for: chord) else { return false }
+            // ⌘R and friends only mean something in a browser pane (SMOODEV-4270).
+            guard !action.needsFocusedBrowser else { return false }
             self.run(action)
             return true
         }
@@ -159,6 +161,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layout.addItem(item(.equalizePanes))
         bar.addItem(submenu(layout, "Layout"))
 
+        let browser = NSMenu()
+        browser.addItem(item(.openBrowser))
+        browser.addItem(.separator())
+        browser.addItem(item(.browserLocation))
+        browser.addItem(item(.browserBack))
+        browser.addItem(item(.browserForward))
+        browser.addItem(item(.browserReload))
+        bar.addItem(submenu(browser, "Browser"))
+
         let window = NSMenu()
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
         window.addItem(withTitle: "Zoom", action: #selector(NSWindow.zoom(_:)), keyEquivalent: "")
@@ -253,11 +264,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TabLatency.measure(raw) { run(action, tag: sender.tag) }
     }
 
+    /// Only the browser's own actions ever disable: off a browser pane, ⌘R and
+    /// friends must reach the terminal, which a live menu item would prevent.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let raw = item.representedObject as? String, FlowAction(rawValue: raw)?.needsFocusedBrowser == true else { return true }
+        return app.mainWindow?.center.focusedBrowser != nil
+    }
+
     func run(_ action: FlowAction, tag: Int = 0) {
         let center = app.mainWindow?.center
         switch action {
         case .settings: app.showSettings()
         case .commandPalette: showCommandPalette()
+        case .openBrowser: center?.openBrowser()
+        case .browserLocation: center?.focusedBrowser?.focusLocation()
+        case .browserBack: center?.focusedBrowser?.goBack()
+        case .browserForward: center?.focusedBrowser?.goForward()
+        case .browserReload: center?.focusedBrowser?.reload()
         case .find: center?.showFind()
         case .findNext: center?.navigateFind(forward: true)
         case .findPrevious: center?.navigateFind(forward: false)

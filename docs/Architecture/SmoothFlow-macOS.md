@@ -25,6 +25,7 @@ apps/smoothflow/
 ├── Sources/
 │   ├── Flow/        FlowFrame (codec) · FlowStore (reducer) · FlowClient (WS) · DaemonAddress · DaemonManager
 │   ├── Terminal/    GhosttyRuntime (one ghostty_app) · TerminalSurfaceView (NSView per session) · TerminalFind · TerminalLink
+│   ├── Browser/     BrowserURL (what may load) · BrowserPaneView (WKWebView + URL bar)
 │   ├── UI/          MainWindow (AppKit split) · CenterViewController (tabs, splits, steer bar)
 │   │                FleetSidebar · PearlRail · InboxView · Sheets · SettingsView (SwiftUI in NSHostingView)
 │   │                CommandPalette (⌘⇧P: AppKit panel and field over a SwiftUI list)
@@ -104,6 +105,67 @@ re-adopted, a dead agent is resumed and a shell reopens in its last directory
 (see [SmoothFlow § pty host](SmoothFlow.md#pty-host)), so the panes fill back
 in. A pane whose session the engine no longer knows comes back empty. It is
 never removed, and a corrupt or newer-version value is ignored.
+
+## Browser pane (SMOODEV-4270)
+
+A browser pane is a leaf of the same split tree as a terminal pane, so splits,
+zoom, directional focus, ⌘W and tabs all work on it unchanged. `SurfaceTab.browsers`
+maps a pane to its URL, and a pane is a browser or shows a session, never both.
+The `BrowserPaneView` lives inside its `SessionPane`, which `PaneTreeView` keeps
+across a relayout, so a split or a zoom does not reload the page. A restored tab
+loads its pages the first time it is shown.
+
+**Opening one.** ⌘⇧L (Browser ▸ New Browser Pane) fills the focused pane if it is
+empty and otherwise splits right, with the keyboard in the URL bar. Picking a
+session in the sidebar never overwrites a page: with a browser focused, the
+session goes to the tab's first terminal pane, or to a new split if there is none.
+
+**Terminal links.** `AppController.performLink` is the single hook, set as each
+surface's `performLink`. It takes what `TerminalLink.resolve` already decided. A
+web page goes to `CenterViewController.openLink`, which reuses the tab's browser
+pane or opens one beside the terminal and leaves the keyboard in the terminal.
+Everything else (mail, ssh, files) keeps `TerminalLink.perform`. Settings ▸
+Terminal ▸ _Open ⌘-clicked web links in a browser pane_
+(`browser.openTerminalLinks`, on by default) sends web links to the default
+browser instead.
+
+**Site data: non-persistent.** All panes share one in-memory
+`WKWebsiteDataStore.nonPersistent()`. Cookies and storage end with the app, and
+nothing a page leaves is written to disk. This console opens links that agents
+print, which are untrusted, and an in-memory store means such a link never lands
+in a long-lived signed-in session. The cost is signing in again after a relaunch.
+An app-specific persistent store would keep logins, and it is a one-line change in
+`BrowserWebSetup` if that turns out to be the better trade.
+
+**A page gets no bridge.** There are no script message handlers and no user
+scripts. `BrowserPaneView` refuses downloads, camera and microphone, and it keeps
+`target=_blank` and clicked `window.open` in the pane. Script cannot open windows
+by itself. Web Inspector is off. Agent control of the browser is not built.
+
+**Only http and https.** `BrowserURL` has the rules:
+
+| Where                                     | Rule                                                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| URL bar                                   | `http://`, `https://` or a bare host. Every other scheme is refused, as are `file:` and `javascript:`   |
+| URL bar, disguises                        | control characters, whitespace, backslashes, `user@host` and paths are refused                          |
+| Bare host                                 | https, except a local one (`localhost:3000`, `smoo-hub`, `.local`, private IPv4), which gets http       |
+| Top-frame navigation (links, redirects)   | `http` and `https` only, checked in `decidePolicyFor`, and never handed to macOS                        |
+| A page's own frames                       | also `about`, `data` and `blob`, which stay in the page's sandbox                                       |
+| A saved URL                               | the bar's rules again, because the saved value is editable. A failure leaves the pane empty             |
+
+`Info.plist` sets `NSAllowsArbitraryLoadsInWebContent`, because App Transport
+Security otherwise blocks plain http in a web view, and dev servers speak it. The
+key covers `WKWebView` only.
+
+**Saved layout.** `SavedTab.browsers` (leaf position → URL) is optional, and it is
+left out of the JSON when a tab has no browser. `SavedLayout.version` stays 1: a
+layout from before this decodes, and an older build reading a newer layout shows
+those panes empty. Only the URL is saved, so history and site data do not come
+back. The URL is saved whole, so a token in a query string lands in the app's
+defaults.
+
+Not built: find in page (⌘F does nothing on a browser pane), file uploads, and
+downloads.
 
 ## Daemon lifecycle and TCC — the part cmux gets wrong
 

@@ -41,7 +41,9 @@ shares its title, so the tests key on this identifier), `session.close.live` /
 `session.close.dirty` (what the sheet says it will destroy),
 `session.close.refusal` / `session.close.force` / `session.close.keep`,
 `settings.pane.{permissions,attention,harnesses,terminal,phones,daemon}`,
-`settings.terminal.{family,size,ligatures,sample}`.
+`settings.terminal.{family,size,ligatures,sample,linksInPane}`, `browser.pane`,
+`browser.url`, `browser.back`, `browser.forward`, `browser.reload`,
+`browser.message`, `browser.page`.
 
 ## The unit bundle runs inside the app (th-dccc80)
 

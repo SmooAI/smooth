@@ -279,20 +279,27 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         stage.mark("tree")
         for id in t.panes {
             let pane = treeView.pane(id)
-            if let sid = t.sessions[id], app.store.sessions[sid] != nil {
+            if let url = t.browsers[id] {
+                let tabId = t.id
+                pane.hostBrowser(url: url).onURLChange = { [weak self] in self?.browserNavigated(tab: tabId, pane: id, to: $0) }
+            } else if let sid = t.sessions[id], app.store.sessions[sid] != nil {
                 pane.host(app.surface(for: sid), id: sid)
             } else {
                 pane.showEmpty(launching: launching.contains(id))
             }
         }
         stage.mark("host")
-        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle(home: self.app.store.home) } }, active: activeTabIndex)
+        refreshStrip()
         stage.mark("strip")
         refreshHeaders()
         stage.mark("headers")
         if let sid = t.sessions[t.focused], app.store.focusedId != sid { app.store.focusedId = sid }
         stage.mark("focus")
         TabLatency.log.debug("renderTabs \(stage.summary, privacy: .public)")
+    }
+
+    private func refreshStrip() {
+        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle(home: self.app.store.home) } }, active: activeTabIndex)
     }
 
     /// A pane took focus (click, or the surface became first responder): it is
@@ -358,7 +365,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             let made = await self.app.openShell(source: source, picked: picked)
             self.launching.remove(pane)
             guard let made, let i = self.surfaceTabs.firstIndex(where: { $0.id == tabId }),
-                  self.surfaceTabs[i].root.contains(pane), self.surfaceTabs[i].sessions[pane] == nil else {
+                  self.surfaceTabs[i].root.contains(pane), self.surfaceTabs[i].sessions[pane] == nil, self.surfaceTabs[i].browsers[pane] == nil else {
                 self.renderTabs()
                 return
             }
@@ -369,6 +376,48 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
                 self.focusActiveSurface()
             }
         }
+    }
+
+    // MARK: browser panes (SMOODEV-4270)
+
+    /// The browser pane the keyboard is in, if that is what is focused.
+    var focusedBrowser: BrowserPaneView? {
+        guard tab == .terminal, let t = activeTab, t.browsers[t.focused] != nil else { return nil }
+        return treeView.pane(t.focused).browser
+    }
+
+    /// ⌘⇧L: a browser pane in the focused pane if it is empty, else beside it,
+    /// with the keyboard in its URL bar.
+    func openBrowser() {
+        if tab != .terminal { tab = .terminal }
+        guard var t = activeTab else { return }
+        t.openBrowser(url: "", busy: launching.contains(t.focused))
+        replaceActiveTab(t)
+        focusedBrowser?.focusLocation()
+    }
+
+    /// A web link from a terminal: into this tab's browser pane, or a new one
+    /// beside the terminal. The keyboard stays in the terminal, which is where
+    /// the click came from and where an agent may be waiting for an answer.
+    func openLink(_ url: URL) {
+        if tab != .terminal { tab = .terminal }
+        guard var t = activeTab else { return }
+        let origin = t.focused
+        let existing = t.panes.first { t.browsers[$0] != nil }
+        let pane = existing ?? t.openBrowser(url: url.absoluteString)
+        t.browsers[pane] = url.absoluteString
+        t.focused = origin
+        if let zoomed = t.zoomed, zoomed != pane { t.zoomed = nil }
+        replaceActiveTab(t)
+        if existing != nil { treeView.pane(pane).browser?.navigate(to: url) }
+        focusActiveSurface()
+    }
+
+    /// The page moved on: the layout remembers it, and the strip may name it.
+    private func browserNavigated(tab tabId: Int, pane: PaneID, to url: String) {
+        guard let i = surfaceTabs.firstIndex(where: { $0.id == tabId }), surfaceTabs[i].browsers[pane] != nil, surfaceTabs[i].browsers[pane] != url else { return }
+        surfaceTabs[i].browsers[pane] = url
+        refreshStrip()
     }
 
     private let renamer = TabRenamePopover()
@@ -506,6 +555,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             guard var t = activeTab else { return }
             _ = t.closeFocused()
             replaceActiveTab(t)
+            // A closed web view hands the keyboard to nobody.
+            focusActiveSurface()
         case .tab:
             closeTab()
         case .last:
@@ -514,6 +565,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             // running in the fleet; pick it in the sidebar to see it again.
             guard var t = activeTab else { return }
             t.sessions[t.focused] = nil
+            t.browsers[t.focused] = nil
             replaceActiveTab(t)
         }
     }
@@ -569,6 +621,10 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     }
 
     private func focusActiveSurface() {
+        if let browser = focusedBrowser {
+            browser.focusContent()
+            return
+        }
         guard let t = activeTab, let sid = t.sessions[t.focused], let surface = app.surfaceIfLoaded(sid) else { return }
         view.window?.makeFirstResponder(surface)
     }
@@ -576,15 +632,9 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     /// The focused session goes into the focused pane of the active tab.
     func showSession(_ id: String) {
         guard let s = app.store.sessions[id], var t = activeTab else { return }
-        // Already on screen in this tab? Move the focus there instead of
-        // stacking the same session into a second pane.
-        if let existing = t.panes.first(where: { t.sessions[$0] == id }) {
-            guard t.focused != existing else { return }
-            t.focused = existing
-        } else {
-            guard t.sessions[t.focused] != id else { return }
-            t.sessions[t.focused] = id
-        }
+        // Already on screen in this tab? `place` moves the focus there instead
+        // of stacking the same session into a second pane.
+        guard t.place(session: id) else { return }
         replaceActiveTab(t)
         pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))"
         refreshTabGate()
@@ -629,7 +679,9 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     }
 }
 
-/// One split pane: a header line + the hosted terminal surface.
+/// One split pane: a header line + the hosted terminal surface, or a browser.
+/// The browser lives and dies with its pane, which `PaneTreeView` keeps across
+/// a relayout, so a split or a zoom never reloads the page.
 @MainActor
 final class SessionPane: NSView {
     private(set) var sessionId: String?
@@ -639,6 +691,7 @@ final class SessionPane: NSView {
     var headerView: NSView { header }
     private let dot = NSView()
     private var hosted: NSView?
+    private(set) var browser: BrowserPaneView?
 
     init() {
         super.init(frame: .zero)
@@ -669,6 +722,7 @@ final class SessionPane: NSView {
         // A session shown in two tabs has one surface: the other tab's pane
         // may have taken it since, so "already here" means its superview.
         guard sessionId != id || hosted !== view || view.superview !== self else { return }
+        dropBrowser()
         sessionId = id
         if let old = hosted, old !== view, old.superview === self { old.removeFromSuperview() }
         hosted = view
@@ -681,6 +735,36 @@ final class SessionPane: NSView {
         view.onHostFocus = { [weak self] in self?.onActivate?() }
     }
 
+    /// Show the browser pane, made on first ask with `url` as its first page.
+    /// Afterwards the page belongs to the browser: navigate through it. It has
+    /// its own bar, so it takes the header's line too.
+    @discardableResult
+    func hostBrowser(url: String) -> BrowserPaneView {
+        if let browser { return browser }
+        if let old = hosted, old.superview === self { old.removeFromSuperview() }
+        hosted = nil
+        sessionId = nil
+        header.isHidden = true
+        dot.isHidden = true
+        let view = BrowserPaneView(url: url)
+        view.onActivate = { [weak self] in self?.onActivate?() }
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: leadingAnchor), view.trailingAnchor.constraint(equalTo: trailingAnchor),
+            view.topAnchor.constraint(equalTo: topAnchor), view.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        browser = view
+        return view
+    }
+
+    private func dropBrowser() {
+        browser?.removeFromSuperview()
+        browser = nil
+        header.isHidden = false
+        dot.isHidden = false
+    }
+
     func setHeader(_ s: Session, kindLabel: String) {
         header.stringValue = "\(s.tabTitle) · \(kindLabel) · \(Theme.stateLabel(s))"
         dot.layer?.backgroundColor = NSColor(Theme.dot(for: s)).cgColor
@@ -689,6 +773,7 @@ final class SessionPane: NSView {
     /// A pane with nothing in it yet: a shell on its way (`launching`), or
     /// an emptied pane waiting for you to pick a session.
     func showEmpty(launching: Bool = false) {
+        dropBrowser()
         header.stringValue = launching ? "starting shell…" : "empty · pick a session in the sidebar"
         dot.layer?.backgroundColor = Theme.faint.cgColor
         guard sessionId != nil || hosted != nil else { return }
