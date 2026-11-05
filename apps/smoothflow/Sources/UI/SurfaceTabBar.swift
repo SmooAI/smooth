@@ -35,12 +35,48 @@ final class SurfaceTabBar: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    /// One tab's views, kept so an update can restyle instead of rebuild.
+    private struct Cell {
+        let view: NSView
+        let button: NSButton
+        let underline: NSView
+    }
+
+    private var cells: [Cell] = []
+    private var shown: (titles: [String], active: Int) = ([], -1)
+
+    /// How an update reaches the strip (SMOODEV-4127): nothing when nothing
+    /// changed (every render calls this), in place when only titles or the
+    /// active tab did, a rebuild only when tabs came or went.
+    enum Change: Equatable { case none, restyle, rebuild }
+
+    static func change(from old: (titles: [String], active: Int), to new: (titles: [String], active: Int)) -> Change {
+        if old.titles == new.titles, old.active == new.active { return .none }
+        return old.titles.count == new.titles.count ? .restyle : .rebuild
+    }
+
     func update(titles: [String], active: Int) {
+        let change = Self.change(from: shown, to: (titles, active))
+        shown = (titles, active)
+        switch change {
+        case .none:
+            return
+        case .restyle where cells.count == titles.count:
+            for (i, title) in titles.enumerated() { style(cells[i], title: title, active: i == active) }
+            return
+        case .restyle where titles.count < 2:
+            return // a lone tab has no strip to restyle
+        case .restyle, .rebuild:
+            break
+        }
         row.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        cells = []
         isHidden = titles.count < 2
         guard titles.count > 1 else { return }
         for (i, title) in titles.enumerated() {
-            row.addArrangedSubview(tab(title, index: i, active: i == active))
+            let c = tab(title, index: i, active: i == active)
+            cells.append(c)
+            row.addArrangedSubview(c.view)
         }
         let plus = NSButton(title: "+", target: self, action: #selector(newTab))
         plus.bezelStyle = .accessoryBarAction
@@ -52,18 +88,23 @@ final class SurfaceTabBar: NSView {
 
     /// Tab `index`'s cell, while the strip shows — where ⌘⇧R's popover points.
     func cell(at index: Int) -> NSView? {
-        guard !isHidden, row.arrangedSubviews.indices.contains(index), index < row.arrangedSubviews.count - 1 else { return nil }
-        return row.arrangedSubviews[index]
+        guard !isHidden, cells.indices.contains(index) else { return nil }
+        return cells[index].view
     }
 
-    private func tab(_ title: String, index: Int, active: Bool) -> NSView {
+    private func style(_ c: Cell, title: String, active: Bool) {
+        if c.button.title != title { c.button.title = title }
+        c.button.font = .systemFont(ofSize: 11, weight: active ? .semibold : .regular)
+        c.button.contentTintColor = active ? nil : Theme.muted
+        c.underline.layer?.backgroundColor = active ? Theme.teal.cgColor : NSColor.clear.cgColor
+    }
+
+    private func tab(_ title: String, index: Int, active: Bool) -> Cell {
         let button = NSButton(title: title, target: self, action: #selector(select(_:)))
         button.tag = index
         button.bezelStyle = .accessoryBarAction
         button.isBordered = false
         button.controlSize = .small
-        button.font = .systemFont(ofSize: 11, weight: active ? .semibold : .regular)
-        button.contentTintColor = active ? nil : Theme.muted
         button.setAccessibilityIdentifier("center.tab.\(index)")
 
         let close = NSButton(title: "×", target: self, action: #selector(close(_:)))
@@ -76,7 +117,6 @@ final class SurfaceTabBar: NSView {
 
         let underline = NSView()
         underline.wantsLayer = true
-        underline.layer?.backgroundColor = active ? Theme.teal.cgColor : NSColor.clear.cgColor
         underline.translatesAutoresizingMaskIntoConstraints = false
 
         let labels = NSStackView(views: [button, close])
@@ -86,7 +126,27 @@ final class SurfaceTabBar: NSView {
         cell.orientation = .vertical
         cell.spacing = 2
         NSLayoutConstraint.activate([underline.heightAnchor.constraint(equalToConstant: 2), underline.widthAnchor.constraint(equalTo: labels.widthAnchor)])
-        return cell
+        let c = Cell(view: cell, button: button, underline: underline)
+        style(c, title: title, active: active)
+        return c
+    }
+
+    /// Which tab a point in the strip falls on: the cell whose span covers
+    /// `x`, so the gap between two tabs closes neither.
+    static func tabIndex(atX x: CGFloat, spans: [ClosedRange<CGFloat>]) -> Int? {
+        spans.firstIndex { $0.contains(x) }
+    }
+
+    /// Middle-click closes a tab, as in every browser and terminal. The
+    /// buttons do not take the other mouse button, so it reaches the strip.
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2, !isHidden else { return super.otherMouseUp(with: event) }
+        let x = convert(event.locationInWindow, from: nil).x
+        let spans = cells.map { c -> ClosedRange<CGFloat> in
+            let f = c.view.convert(c.view.bounds, to: self)
+            return f.minX...f.maxX
+        }
+        if let i = Self.tabIndex(atX: x, spans: spans) { onClose?(i) }
     }
 
     @objc private func select(_ sender: NSButton) { onSelect?(sender.tag) }
