@@ -15,6 +15,7 @@ pub const FILES: &[(&str, &[u8])] = &[
     ("manifest.json", include_bytes!("extension/manifest.json")),
     ("background.js", include_bytes!("extension/background.js")),
     ("cdp.js", include_bytes!("extension/cdp.js")),
+    ("groups.js", include_bytes!("extension/groups.js")),
     ("popup.html", include_bytes!("extension/popup.html")),
     ("popup.js", include_bytes!("extension/popup.js")),
     ("icon.svg", include_bytes!("extension/icon.svg")),
