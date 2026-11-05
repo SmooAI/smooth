@@ -156,6 +156,9 @@ impl Fake {
                 paint(&self.spec.needs_you);
                 let reply = self.hook("PermissionRequest", &json!({"tool_name": "Bash", "tool_input": {"command": "git push"}}));
                 log(&self.spec, "decision", &json!({"reply": reply}));
+                if !self.spec.hold_permission {
+                    self.read_keys();
+                }
             }
             Mechanism::Mapped { needs_you: Some(ev), .. } => {
                 paint(&self.spec.needs_you);

@@ -1,0 +1,19 @@
+  >_ OpenAI Codex (v0.162.0)
+     /work/project
+
+› say hi 74404095e2
+
+• Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+  a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+  Worked for 6s • 10:38 PM
+
+› tell me about the rig
+
+• Working (0s • esc to interrupt)
+
+› Ask Codex to do anything
+
+  mock-model default · /work/project · ⠦
+  ← for agents · ? for shortcuts                                                               ⚠ 1 warning · f2 to view

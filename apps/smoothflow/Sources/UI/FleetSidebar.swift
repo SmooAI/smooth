@@ -78,6 +78,13 @@ struct FleetSidebar: View {
                             .accessibilityIdentifier("sidebar.branch.\(s.id)")
                     }
                 }
+                if s.state == .needsYou, let since = s.attention?.since {
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Text(Theme.waited(since, now: context.date))
+                            .font(.caption2).foregroundStyle(Color(Theme.faint))
+                            .accessibilityIdentifier("sidebar.waited.\(s.id)")
+                    }
+                }
                 if let note = s.sidebarNote {
                     Text(note).font(.caption2).foregroundStyle(Color(Theme.muted)).lineLimit(1).truncationMode(.tail)
                         .help(note)

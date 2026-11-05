@@ -52,6 +52,27 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertFalse(h[3].isDegraded)
     }
 
+    /// SMOODEV-4268: how far a row can be believed, and how long an ask has waited.
+    func testConfidenceAndAttentionSince() throws {
+        let stale = try JSONDecoder().decode(Session.self, from: Data(#"{"id":"a","state":"working","confidence":"stale"}"#.utf8))
+        XCTAssertEqual(stale.confidence, .stale)
+        XCTAssertEqual(Theme.stateLabel(stale), "working?")
+        let old = try JSONDecoder().decode(Session.self, from: Data(#"{"id":"b","state":"working"}"#.utf8))
+        XCTAssertEqual(old.confidence, .confirmed, "an older engine sends none")
+        XCTAssertEqual(Theme.stateLabel(old), "working")
+        let future = try JSONDecoder().decode(Session.self, from: Data(#"{"id":"c","state":"idle","confidence":"new-value"}"#.utf8))
+        XCTAssertEqual(future.confidence, .confirmed)
+        let asked = try JSONDecoder().decode(Session.self, from: Data(#"{"id":"d","state":"needs_you","attention":{"reason":"question","since":"2026-01-01T00:00:00Z"}}"#.utf8))
+        XCTAssertEqual(asked.attention?.since, "2026-01-01T00:00:00Z")
+        XCTAssertEqual(Theme.stateLabel(asked), "question", "the wait is its own text, on a timer: this one is not redrawn while a row waits")
+        let start = try XCTUnwrap(ISO8601DateFormatter.flexible.date(from: "2026-01-01T00:00:00Z"))
+        XCTAssertEqual(Theme.waited("2026-01-01T00:00:00Z", now: start.addingTimeInterval(5)), "waiting <1m")
+        XCTAssertEqual(Theme.waited("2026-01-01T00:00:00Z", now: start.addingTimeInterval(180)), "waiting 3m")
+        XCTAssertEqual(Theme.waited("2026-01-01T00:00:00Z", now: start.addingTimeInterval(7200)), "waiting 2h")
+        XCTAssertEqual(Theme.waited("2026-01-01T00:00:00Z", now: start.addingTimeInterval(172_800)), "waiting 2d")
+        XCTAssertEqual(Theme.waited("soon", now: start), "")
+    }
+
     /// SMOODEV-4238: a `pty` session's host answers terminal queries, so its
     /// surface mirrors (libghostty's own answers are suppressed). A row from an
     /// older engine has no `host` and is tmux: the surface answers, as before.

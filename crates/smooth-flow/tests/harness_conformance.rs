@@ -538,7 +538,7 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
                 .ok_or_else(|| format!("attention `{}` carries no request_id to approve", att.reason))?;
             rig.engine.approve(&id, &rid, Decision::Allow).map_err(|e| format!("approve: {e:#}"))?;
             rig.wait(&id, SessionState::Idle, true)?;
-            if spec.mechanism == Mechanism::ClaudeHooks {
+            if spec.mechanism == Mechanism::ClaudeHooks && spec.hold_permission {
                 let d = rig.wait_log("decision", 1).ok_or("the PermissionRequest hook never returned")?;
                 let reply = d["reply"].as_str().unwrap_or_default();
                 if !reply.contains("\"allow\"") {

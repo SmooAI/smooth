@@ -26,7 +26,8 @@ enum Theme {
 
     /// Sidebar dot: teal working, amber needs you / limited, ink done, grey idle.
     static func dot(for s: Session) -> Color {
-        switch s.state {
+        if s.confidence != .confirmed { return Color(faint) }
+        return switch s.state {
         case .working, .starting: Color(teal)
         case .needsYou, .limited: Color(amber)
         case .done: Color(ink)
@@ -37,6 +38,22 @@ enum Theme {
     }
 
     static func stateLabel(_ s: Session) -> String {
+        // A state nothing has confirmed lately is what the row last was.
+        s.confidence == .confirmed ? currentStateLabel(s) : currentStateLabel(s) + "?"
+    }
+
+    /// How long an ask has waited, for a view that redraws on a timer: nothing
+    /// else redraws a row while it waits. Empty for an unreadable stamp.
+    static func waited(_ since: String, now: Date) -> String {
+        guard let d = ISO8601DateFormatter.flexible.date(from: since) else { return "" }
+        let secs = Int(now.timeIntervalSince(d))
+        if secs < 60 { return "waiting <1m" }
+        if secs < 3600 { return "waiting \(secs / 60)m" }
+        if secs < 86400 { return "waiting \(secs / 3600)h" }
+        return "waiting \(secs / 86400)d"
+    }
+
+    private static func currentStateLabel(_ s: Session) -> String {
         switch s.state {
         case .starting: "starting"
         case .working: "working"

@@ -36,6 +36,32 @@ needs_you = ["do you want to proceed", "do you want to make this edit", "❯ 1\\
 usage_limit = ["usage limit reached", "approaching usage limit", "limit will reset", "limit resets at", "out of credits"]
 error = ["api error", "fatal error", "request failed", "execution error"]
 
+# SMOODEV-4268: rules run before the flat lists, and every prompt below carries
+# an "Esc to cancel" footer that the flat `working` list reads as busy. Captured
+# live from Claude Code 2.1.318.
+[[state.scrape.rules]]
+name = "claude-approval"
+state = "needs_you"
+reason = "permission"
+match = ["do you want to proceed\\?", "do you want to make this edit", "do you want to create ", "would you like to proceed", "^\\s*❯ 1\\. yes"]
+unless_below = ["for shortcuts", "shift\\+tab to cycle", "esc to interrupt"]
+
+# AskUserQuestion, with no hooks to say so.
+[[state.scrape.rules]]
+name = "claude-question"
+state = "needs_you"
+reason = "question"
+match = ["enter to select .*esc to cancel"]
+unless_below = ["for shortcuts", "shift\\+tab to cycle", "esc to interrupt"]
+
+# Trust folder, API key, mode notices. Answered in the pane: the trust dialog's
+# first option is "No, exit", so approval keys must not be offered.
+[[state.scrape.rules]]
+name = "claude-dialog"
+state = "needs_you"
+reason = "question"
+match = ["enter to (confirm|continue) · esc to cancel", "do you want to use this api key", "yes, i trust this folder"]
+
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"

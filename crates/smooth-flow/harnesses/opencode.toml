@@ -22,7 +22,9 @@ mode = "resume_session"
 source = "hooks"
 
 [state.hooks]
-install = "th harness enable opencode  # smooth-agent lifecycle plugin posts session.* events to /api/flow/hooks"
+install = "th harness enable opencode  # smooth-agent lifecycle plugin posts session.* and permission/question events to /api/flow/hooks"
+# The plugin only observes the bus: there is no hook to hold open.
+hold_permission = false
 
 [state.scrape]
 # Captured live 2026-09-08: the status line carries "esc interrupt" while the
@@ -34,9 +36,27 @@ needs_you = ["do you want to proceed", "1\\. yes"]
 usage_limit = ["usage limit reached", "approaching usage limit", "limit will reset", "limit resets at", "out of credits"]
 error = ["api error", "fatal error", "request failed"]
 
+# SMOODEV-4268: for a plugin older than this, or one not installed. Captured live
+# from OpenCode 1.18.30.
+[[state.scrape.rules]]
+name = "opencode-permission"
+state = "needs_you"
+reason = "permission"
+match = ["permission required", "allow once\\s+allow always"]
+
+[[state.scrape.rules]]
+name = "opencode-question"
+state = "needs_you"
+reason = "question"
+match = ["enter submit\\s+esc dismiss"]
+
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"
+# "Allow once" is selected first; Esc rejects.
+approve_keys = ["Enter"]
+allow_session_keys = ["Enter"]
+deny_keys = ["Escape"]
 
 [kill]
 signal = "TERM"

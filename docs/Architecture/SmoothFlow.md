@@ -771,19 +771,29 @@ empty `state.hooks.event_map` means the Claude Code table below
 working, `turn_end` → idle) uses its own names, and a `native` source marks
 the row `native` instead of `hooks`.
 
-| Event                                           | State                                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                                                                |
-| `Stop`                                          | `idle`, `unread = true`                                                                  |
-| `PermissionRequest`                             | `needs_you` (`permission`), held open ≤120 s until `flow.approve`                        |
-| `Notification` (permission / question / idle)   | `needs_you`                                                                              |
-| `SessionEnd`                                    | nothing — the PTY decides done/dead (an ADOPTED row has no PTY, so this marks it `done`) |
-| everything else                                 | nothing                                                                                  |
+| Event                                           | State                                                                                                                 |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                                                                                             |
+| `Stop`                                          | `idle`, `unread = true`                                                                                               |
+| `PermissionRequest`                             | `needs_you` (`permission`), held open ≤120 s until `flow.approve`, unless the manifest sets `hold_permission = false` |
+| `Notification` (permission / question / idle)   | `needs_you`                                                                                                           |
+| `SessionEnd`                                    | nothing — the PTY decides done/dead (an ADOPTED row has no PTY, so this marks it `done`)                              |
+| everything else                                 | nothing                                                                                                               |
 
 A `PermissionRequest` reply is the harness's own decision JSON
 (`hookSpecificOutput.decision.behavior = allow|deny`; `allow_session` adds a
 session-scoped `updatedPermissions` rule for the tool). Timing out replies `{}`
 so the harness falls back to its own prompt — which the scraper then sees.
+Claude Code's `AskUserQuestion` arrives as a `PermissionRequest` but is a
+question: `needs_you` with reason `question`, its text as the detail, answered
+at the terminal, and no hook held open.
+
+Hooks do not fire for everything, and that decides the design: no harness
+reports a prompt denied at the terminal or a turn interrupted with Esc, Codex
+runs `PermissionRequest` before it draws its prompt (so holding that hook hides
+the prompt; `hold_permission = false` answers at once), and OpenCode's plugin
+only sees permission and question events. See [How a row's state is
+decided](#status).
 
 ### `th flow hook` — the hook every harness runs (th-f97a27)
 
@@ -834,7 +844,47 @@ no pending hook request ⇒ `needs_you`, answered by pressing the manifest's
 `[steer] approve_keys` / `allow_session_keys` / `deny_keys` (th-5a2314:
 `y` `Enter` for aider, `Enter` on goose's and crush's preselected Allow, `y`
 for cline; Claude Code's `1` / `2` / `Escape` is the default); working/idle
-only for sessions that have never reported a hook.
+outright for sessions that have never reported a hook, and against the last
+hook's word after that ([below](#status)).
+
+### How a row's state is decided (SMOODEV-4268) {#status}
+
+`crates/smooth-flow/src/status.rs` holds the rules as pure functions. A hook is
+the best evidence and applies at once. Then every tick:
+
+| Row reads   | Pane reads                                                            | Row becomes         | Why no hook said so                                                                       |
+| ----------- | --------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------- |
+| `starting`  | idle or working, held 1.5 s                                           | that                | a resumed session's hook may never come                                                   |
+| `working`   | idle, held 1.5 s, text still for 4 s                                  | `idle`              | Esc mid-turn; a footer that reads idle while text streams above it (Codex) does not count |
+| `idle`      | working, held 1.5 s, text moved since the last hook settled           | `working`           | a turn nothing reported; a marker frozen on screen does not count                         |
+| `needs_you` | idle or working, the prompt seen on screen or the pane moved on since | `idle` or `working` | answered or denied at the terminal; any held hook is released with no decision            |
+
+None of this runs within 4 s of a hook, so a hook and a slower repaint do not
+fight. A spinner frame (U+2800 to U+28FF) does not count as text moving: Codex
+leaves one turning after an interrupted turn. A prompt answered in under one
+tick (2 s) with no hook was never seen, so the row stays `needs_you` until the
+pane next changes: the error is deliberately on the side of asking.
+
+**Confidence.** `Session.confidence` is computed when a row is sent, never
+stored:
+
+| `confidence` | Meaning                                                                                                                                  |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `confirmed`  | Evidence is current. `needs_you` and `limited` stay here indefinitely: a person taking their time is not doubt. So does a quiet composer |
+| `stale`      | `working` with no hook and no pane movement for 120 s. The state is what the row last was. Clients show `working?`, dimmed               |
+| `unknown`    | `starting` with no sign of life for 45 s                                                                                                 |
+
+`Session.confirmed_at` is when the engine last had evidence, and
+`Attention.since` is when the current ask began, kept across a repeated
+`needs_you` for the same reason, so clients can show how long it has waited. A
+row owned by another daemon stays `confirmed`, since this one cannot judge it.
+
+The rules are tested three ways: `status.rs` unit tests;
+`tests/status_conformance.rs`, which plays every transition for Claude Code,
+Codex and OpenCode, with hooks and scrape-only, on tmux and the pty host, with
+real panes captured in `tests/status_conformance/`; and
+`tests/status_live/rig.py`, run by hand, which drives the real installed
+harnesses against a mock model and prints a truth table.
 
 ### Hook authentication (th-91d032)
 

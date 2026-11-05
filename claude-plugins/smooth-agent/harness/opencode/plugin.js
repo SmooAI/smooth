@@ -40,6 +40,13 @@ const FLOW_EVENTS = {
     'session.status': 'UserPromptSubmit', // busy ⇒ working
     'session.idle': 'Stop',
     'session.deleted': 'SessionEnd',
+    // An ask and its answer (SMOODEV-4268). No reply is expected: OpenCode draws
+    // its own prompt regardless, and approvals land there as keys.
+    'permission.asked': 'PermissionRequest',
+    'question.asked': 'Notification',
+    'permission.replied': 'PostToolUse',
+    'question.replied': 'PostToolUse',
+    'question.rejected': 'PostToolUse',
 };
 
 const readFile = async (p) => {
@@ -168,6 +175,21 @@ export const SmoothAgent = async ({ $, directory }) => {
                 return hooks[type](props);
             case 'session.status':
                 if (props?.status?.type === 'busy' && sid && handles.has(sid)) flow('session.status', sid, {});
+                return;
+            case 'permission.asked':
+                if (sid && handles.has(sid)) {
+                    flow(type, sid, { tool_name: props?.permission ?? 'tool', tool_input: { command: (props?.patterns ?? []).join(' ') } });
+                }
+                return;
+            case 'question.asked':
+                if (sid && handles.has(sid)) {
+                    flow(type, sid, { notification_type: 'question', message: props?.questions?.[0]?.question ?? 'a question is waiting for you' });
+                }
+                return;
+            case 'permission.replied':
+            case 'question.replied':
+            case 'question.rejected':
+                if (sid && handles.has(sid)) flow(type, sid, {});
                 return;
             case 'message.updated':
                 if (props?.info?.role === 'assistant' && props?.info?.id) assistantMsgs.add(props.info.id);

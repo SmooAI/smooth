@@ -1,0 +1,33 @@
+› say hi 74404095e2
+
+• Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+  a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+  Worked for 6s • 10:38 PM
+
+› tell me about the rig
+
+• Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+  a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+  Worked for 6s • 10:38 PM
+
+› rig-tool please run the thing
+
+• Running mkdir -p mockdir && touch mockdir/x.txt
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: the rig needs an approval
+
+  $ mkdir -p mockdir && touch mockdir/x.txt
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `mkdir -p mockdir` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

@@ -143,6 +143,31 @@ assert.equal(busPosts[0].body.cwd, '/Users/x/dev/bus');
 assert.match(calls[0], /^agent register --name oc-bus-0001 --harness opencode/);
 assert.equal(calls.at(-1), 'agent status --name oc-bus-0001 --status offline');
 assert.equal(calls.length, 3, 'register, idle, offline — the bus path is the same lifecycle');
+
+// SMOODEV-4268: an ask and its answer reach the engine, on a session it knows.
+{
+    const askedFrom = posted.length;
+    const pluginAsk = await SmoothAgent({ $, directory: '/Users/x/dev/ask' });
+    const ask = (type, properties) => pluginAsk.event({ event: { type, properties } });
+    await ask('permission.asked', { sessionID: 'ses_unknown', permission: 'bash', patterns: ['ls'] });
+    await ask('session.created', { sessionID: 'ses_ask00001' });
+    await ask('permission.asked', { sessionID: 'ses_ask00001', permission: 'bash', patterns: ['mkdir a', 'touch b'] });
+    await ask('permission.replied', { sessionID: 'ses_ask00001', reply: 'once' });
+    await ask('question.asked', { sessionID: 'ses_ask00001', questions: [{ question: 'Which color?' }] });
+    await ask('question.replied', { sessionID: 'ses_ask00001' });
+    await ask('question.asked', { sessionID: 'ses_ask00001' });
+    await ask('question.rejected', { sessionID: 'ses_ask00001' });
+    await new Promise((r) => setTimeout(r, 200));
+    const asks = posted.slice(askedFrom);
+    assert.deepEqual(
+        asks.map((p) => p.body.event),
+        ['SessionStart', 'PermissionRequest', 'PostToolUse', 'Notification', 'PostToolUse', 'Notification', 'PostToolUse'],
+        JSON.stringify(asks.map((p) => p.body.event)),
+    );
+    assert.deepEqual(asks[1].body.payload, { tool_name: 'bash', tool_input: { command: 'mkdir a touch b' } });
+    assert.deepEqual(asks[3].body.payload, { notification_type: 'question', message: 'Which color?' });
+    assert.equal(asks[5].body.payload.message, 'a question is waiting for you');
+}
 assert.ok(posted.every((p) => p.url === '/api/flow/hooks'));
 assert.ok(
     posted.every((p) => p.token === 'c0ffee'),

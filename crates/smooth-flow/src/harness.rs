@@ -227,7 +227,7 @@ pub enum FlowEventName {
 }
 
 /// `[state.hooks]`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HooksSpec {
     /// Free text: how the hooks get wired on this machine.
@@ -237,6 +237,32 @@ pub struct HooksSpec {
     /// (`protocol::map_hook_event`).
     #[serde(default)]
     pub event_map: BTreeMap<String, FlowEventName>,
+    /// Whether a `PermissionRequest` hook is held open until `flow.approve`
+    /// answers it. Claude Code draws its prompt while the hook runs, so it can
+    /// be answered from either side. Codex runs the hook BEFORE it draws the
+    /// prompt, so holding it hides the prompt from the person at the terminal:
+    /// set `false` and the hook replies at once, leaving the approval keys.
+    #[serde(default = "default_hold_permission", skip_serializing_if = "is_true")]
+    pub hold_permission: bool,
+}
+
+const fn default_hold_permission() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "the shape serde's skip_serializing_if calls")]
+const fn is_true(v: &bool) -> bool {
+    *v
+}
+
+impl Default for HooksSpec {
+    fn default() -> Self {
+        Self {
+            install: String::new(),
+            event_map: BTreeMap::new(),
+            hold_permission: default_hold_permission(),
+        }
+    }
 }
 
 /// `[state.scrape]` — case-insensitive regexes over the visible pane, plus
@@ -675,6 +701,8 @@ pub struct Scrape {
     /// The `[[state.scrape.rules]]` entry that decided (its `name`, or
     /// `rules[i]`); `None` when the flat lists did.
     pub rule: Option<String>,
+    /// A `needs_you` rule's `reason` (`crate::scrape::RuleSpec::reason`).
+    pub reason: Option<String>,
 }
 
 fn compile_all(field: &str, pats: &[String]) -> Result<Vec<Regex>> {
@@ -743,6 +771,7 @@ impl ScrapeRules {
                 state: hit.state.pane_state(),
                 reset_text: hit.reset_text,
                 rule: Some(hit.rule),
+                reason: hit.reason,
             };
         }
         let pane = obs.text;
@@ -760,6 +789,7 @@ impl ScrapeRules {
                 state: PaneState::Working,
                 reset_text: None,
                 rule: None,
+                reason: None,
             };
         }
         if let Some(r) = self.usage_limit.iter().find(|r| r.is_match(pane)) {
@@ -768,6 +798,7 @@ impl ScrapeRules {
                 state: PaneState::UsageLimit,
                 reset_text,
                 rule: None,
+                reason: None,
             };
         }
         let pending_approval = match (last_line_matching(&self.needs_you), last_line_matching(&self.idle)) {
@@ -788,6 +819,7 @@ impl ScrapeRules {
             state,
             reset_text: None,
             rule: None,
+            reason: None,
         }
     }
 }
@@ -1421,7 +1453,9 @@ mod tests {
         assert!(err("[[state.scrape.rules]]\nstate=\"idle\"\nwhere=\"everywhere\"\nmatch=[\"x\"]").contains("where"));
         assert!(err("[state.scrape]\ntail_lines=0").contains("tail_lines: must be"));
         // A manifest without rules serialises exactly as before (no empty `rules`/`tail_lines` keys).
-        let round = toml::to_string(&claude()).unwrap();
+        let mut bare = claude();
+        bare.state.scrape.rules.clear();
+        let round = toml::to_string(&bare).unwrap();
         assert!(
             !round.contains("scrape.rules") && !round.contains("\nrules =") && !round.contains("tail_lines"),
             "{round}"

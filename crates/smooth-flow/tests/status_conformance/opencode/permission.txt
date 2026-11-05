@@ -1,0 +1,37 @@
+  ┃
+  ┃  say hi 9fd43a86ab
+  ┃
+
+     Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately
+     slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal
+     stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+     ▣  Build · mock · 6.7s
+
+  ┃
+  ┃  tell me about the rig
+  ┃
+
+     Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately
+     slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal
+     stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+     ▣  Build · mock · 5.4s
+
+  ┃
+  ┃  rig-tool please run the thing
+  ┃
+
+     $ mkdir -p mockdir && touch mockdir/x.txt
+
+     ▣  Build · mock
+
+  ┃
+  ┃  △ Permission required
+  ┃    # Shell command
+  ┃
+  ┃  $ mkdir -p mockdir && touch mockdir/x.txt
+  ┃
+  ┃
+  ┃   Allow once   Allow always   Reject                                 ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃

@@ -1,0 +1,39 @@
+  ┃
+  ┃  rig-tool please run the thing
+  ┃
+
+  ┃
+  ┃  $ mkdir -p mockdir && touch mockdir/x.txt
+  ┃
+  ┃  (no output)
+  ┃
+
+     Done.
+
+     ▣  Build · mock · 26.9s
+
+  ┃
+  ┃  rig-tool please run it again
+  ┃
+
+     $ mkdir -p mockdir && touch mockdir/x.txt
+
+  ┃
+  ┃  rig-question ask me something
+  ┃
+
+     → Asked 1 question
+
+     ▣  Build · mock
+
+  ┃
+  ┃  Which color should the rig use?
+  ┃
+  ┃  1. Teal
+  ┃     the teal one
+  ┃  2. Amber
+  ┃     the amber one
+  ┃  3. Type your own answer
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss
+  ┃
