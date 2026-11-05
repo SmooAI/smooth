@@ -1,0 +1,39 @@
+ ▝▝   ▝▝   /work/project
+
+❯ say hi 7a22e7c3c8
+
+⏺ Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+  a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+✻ Worked for 5s · done 10:49 PM
+
+❯ tell me about the rig
+
+⏺ Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+  a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+✻ Baked for 5s · done 10:50 PM
+
+❯ rig-tool please run the thing
+
+  Making a marker directory
+  ⎿  $ mkdir -p mockdir && touch mockdir/x.txt
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ make a marker directory
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ mkdir -p mockdir && touch mockdir/x.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ Claude requested permissions to edit
+ │ /work/project which is a sensitive file.
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for mkdir -p mockdir and touch mockdir/x.txt commands in
+      /work/project
+   3. No
+
+ Esc to cancel · Tab to amend

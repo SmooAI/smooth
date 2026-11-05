@@ -179,6 +179,11 @@ pub struct Attention {
     /// Correlates a `permission` attention with the `flow.approve` that answers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// When this ask began: "waiting 3d". An ask raised again for the same
+    /// reason keeps its first time. Stored with the attention, so it survives
+    /// a daemon restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
 }
 
 impl Attention {
@@ -190,6 +195,7 @@ impl Attention {
             detail: None,
             resume_at: None,
             request_id: None,
+            since: None,
         }
     }
 
@@ -277,6 +283,13 @@ pub struct Session {
     /// ahead of the pearl id. Off the wire when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_pinned: bool,
+    /// How far `state` can be believed right now (SMOODEV-4268, `status.rs`).
+    /// Computed, not stored: `stale` / `unknown` rows must not read as live.
+    #[serde(default)]
+    pub confidence: crate::status::Confidence,
+    /// When the engine last had evidence for `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<DateTime<Utc>>,
 }
 
 /// A fan-out: N candidate sessions racing one prompt.
@@ -629,6 +642,8 @@ impl FlowStore {
             ended_at: ended.as_deref().map(parse_ts),
             exit_code: row.get("exit_code")?,
             unread: row.get::<_, i64>("unread")? != 0,
+            confidence: crate::status::Confidence::default(),
+            confirmed_at: None,
             adopted: row.get::<_, i64>("adopted")? != 0,
             host: row.get::<_, Option<String>>("host")?.as_deref().and_then(HostKind::parse).unwrap_or_default(),
             title_pinned: row.get::<_, i64>("title_pinned")? != 0,

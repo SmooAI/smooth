@@ -369,6 +369,7 @@ impl World {
             host: smooth_flow::host::default_host(),
             pty_host: Some(Arc::new(PtyHost::new(OWNER, &self.hosts, cmd()))),
             new_host: HostKind::Pty,
+            status_windows: smooth_flow::status::StatusWindows::default(),
         })
         .unwrap()
     }

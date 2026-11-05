@@ -117,6 +117,8 @@ pub struct EngineConfig {
     /// (`pty` unless it says `tmux`, SMOODEV-4238). A kind no configured host
     /// provides falls back to `host`.
     pub new_host: HostKind,
+    /// When an unconfirmed state stops reading as live (SMOODEV-4268).
+    pub status_windows: crate::status::StatusWindows,
 }
 
 impl EngineConfig {
@@ -136,6 +138,7 @@ impl EngineConfig {
             host: crate::host::default_host(),
             pty_host: None,
             new_host: HostKind::from_env(),
+            status_windows: crate::status::StatusWindows::default(),
         }
     }
 }
@@ -214,6 +217,8 @@ struct Runtime {
     titler: crate::autotitle::Titler,
     /// Pre-warmed shells waiting to be claimed (SMOODEV-4127).
     spares: crate::prewarm::Pool,
+    /// Session id → the evidence behind its state (SMOODEV-4268).
+    status: HashMap<String, crate::status::Track>,
 }
 
 /// A prompt waiting to be pasted into a harness's composer.
@@ -358,6 +363,8 @@ struct Inner {
     host: Arc<dyn SessionHost>,
     /// The engine-owned PTY host, for `pty` rows (th-dc9822).
     pty_host: Option<Arc<dyn SessionHost>>,
+    /// When an unconfirmed state stops reading as live.
+    status_windows: crate::status::StatusWindows,
     /// The kind of host new sessions launch on.
     new_host: HostKind,
     /// Per session: the generation of the latest replay asked for, so a
@@ -850,6 +857,7 @@ impl Engine {
                 pty_gen: std::sync::atomic::AtomicU64::new(0),
                 host: cfg.host,
                 pty_host: cfg.pty_host,
+                status_windows: cfg.status_windows,
                 new_host,
                 replay_gen: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -1349,7 +1357,43 @@ impl Engine {
     }
 
     fn emit_session(&self, s: &Session) {
-        self.emit(ServerFrame::Session { session: s.clone() });
+        let mut session = s.clone();
+        self.decorate(&mut session);
+        self.emit(ServerFrame::Session { session });
+    }
+
+    /// Fill in how far `s.state` can be believed. A row another daemon
+    /// supervises is that daemon's to judge; this one has no evidence either
+    /// way and does not guess.
+    fn decorate(&self, s: &mut Session) {
+        if !s.kind.is_agent() || !owned_here(s, &self.default_socket()) {
+            return;
+        }
+        let tracked = {
+            let rt = self.rt();
+            rt.status.get(&s.id).map(|t| (t.age(Instant::now()), t.confirmed_at()))
+        };
+        let (age, confirmed_at) = tracked.unwrap_or((None, None));
+        let age = age.unwrap_or_else(|| Utc::now().signed_duration_since(s.updated_at).to_std().unwrap_or_default());
+        s.confidence = crate::status::confidence(s.state, age, self.inner.status_windows);
+        s.confirmed_at = confirmed_at.or(Some(s.updated_at));
+    }
+
+    /// Tell clients when a row's confidence moved with no state change.
+    fn publish_confidence(&self, id: &str) -> Result<()> {
+        let Some(s) = self.get(id)? else { return Ok(()) };
+        let changed = {
+            let mut rt = self.rt();
+            let t = rt.status.entry(id.to_string()).or_default();
+            let changed = t.published != s.confidence;
+            t.published = s.confidence;
+            changed
+        };
+        if changed {
+            tracing::info!(session = %id, state = %s.state, confidence = s.confidence.as_str(), "flow: confidence changed");
+            self.emit(ServerFrame::Session { session: s });
+        }
+        Ok(())
     }
 
     /// The `flow.hello` frame for a new client.
@@ -1369,7 +1413,11 @@ impl Engine {
     /// # Errors
     /// On a store failure.
     pub fn list(&self) -> Result<Vec<Session>> {
-        self.with_store(FlowStore::list)
+        let mut rows = self.with_store(FlowStore::list)?;
+        for s in &mut rows {
+            self.decorate(s);
+        }
+        Ok(rows)
     }
 
     /// One session.
@@ -1377,7 +1425,11 @@ impl Engine {
     /// # Errors
     /// On a store failure; `Ok(None)` for an unknown id.
     pub fn get(&self, id: &str) -> Result<Option<Session>> {
-        self.with_store(|st| st.get(id))
+        let mut row = self.with_store(|st| st.get(id))?;
+        if let Some(s) = &mut row {
+            self.decorate(s);
+        }
+        Ok(row)
     }
 
     fn require(&self, id: &str) -> Result<Session> {
@@ -1387,10 +1439,26 @@ impl Engine {
     /// Transition + broadcast (`flow.session`, and `flow.attention` when the
     /// attention changed).
     #[allow(clippy::needless_pass_by_value)]
-    fn set_state(&self, id: &str, state: SessionState, attention: Option<Attention>) -> Result<Option<Session>> {
+    fn set_state(&self, id: &str, state: SessionState, mut attention: Option<Attention>) -> Result<Option<Session>> {
         let before = self.get(id)?;
         if let Some(b) = &before {
             self.turn_boundary(b, state);
+        }
+        if let Some(att) = &mut attention {
+            // The same ask raised again is still the ask that began back then.
+            let began = before
+                .as_ref()
+                .and_then(|b| b.attention.as_ref())
+                .filter(|b| b.reason == att.reason)
+                .and_then(|b| b.since);
+            att.since = began.or_else(|| Some(Utc::now()));
+        }
+        {
+            let now = Instant::now();
+            let mut rt = self.rt();
+            let t = rt.status.entry(id.to_string()).or_default();
+            t.confirm(now);
+            t.set_asking(state == SessionState::NeedsYou, now);
         }
         let after = self.with_store(|st| st.set_state(id, state, attention.as_ref()))?;
         if let Some(s) = &after {
@@ -2627,6 +2695,7 @@ impl Engine {
 
     /// Relaunch a dead agent with the resume argv, honouring rule 4.
     fn relaunch(&self, s: &Session) -> Result<Session> {
+        self.rt().status.entry(s.id.clone()).or_default().restart(Instant::now());
         if let Some(agent) = &s.agent_session_id {
             let holder = {
                 let rt = self.rt();
@@ -2714,6 +2783,7 @@ impl Engine {
             tracing::debug!(session = %s.id, event = %ev.event, "flow hook for a held session — ignored");
             return Ok(HookReply::Immediate(json!({})));
         }
+        self.rt().status.entry(s.id.clone()).or_default().note_hook(Instant::now());
         // th-0f6126: the manifest says how this harness's events read
         // (`state.hooks.event_map`), and whether they count as `hooks` or
         // `native` state; an empty map is the Claude Code table.
@@ -2745,7 +2815,20 @@ impl Engine {
                     // Never approvable from SmoothFlow (see below).
                     att.request_id = None;
                 }
-                if claude_protocol && ev.event == "PermissionRequest" && trusted {
+                // Claude Code's AskUserQuestion arrives as a permission request.
+                // It is answered at the terminal, so it is not held open and
+                // nothing offers to "approve" it.
+                if claude_protocol && ev.event == "PermissionRequest" {
+                    if let Some(question) = crate::status::asked_question(&ev.payload) {
+                        att = Attention::new("question").with_detail(question);
+                    }
+                }
+                let asks_permission = claude_protocol && ev.event == "PermissionRequest" && trusted && att.reason == "permission";
+                if asks_permission && manifest.as_ref().is_some_and(|m| !m.state.hooks.hold_permission) {
+                    // Codex draws its prompt only after this hook returns: reply
+                    // now. The unknown id falls through to the approval keys.
+                    att.request_id = Some(format!("hook-{}", uuid::Uuid::new_v4().simple()));
+                } else if asks_permission {
                     let request_id = uuid::Uuid::new_v4().simple().to_string();
                     att.request_id = Some(request_id.clone());
                     let (tx, rx) = oneshot::channel();
@@ -3152,7 +3235,7 @@ impl Engine {
                 let att = Attention::new("crashed").with_detail("adopted session went silent — its terminal is gone");
                 self.set_state(&s.id, SessionState::Dead, Some(att))?;
             }
-            return Ok(());
+            return self.publish_confidence(&s.id);
         }
         // Rule 4 parked this row (`held`: its harness session is owned by a
         // live pid). Its tmux session is gone, which is NOT an unexpected
@@ -3246,7 +3329,19 @@ impl Engine {
             cursor_y: meta.as_ref().and_then(|m| m.cursor_y),
             quiet_for,
         });
+        let reconciled = self.reconcile_with_pane(s, hooks_seen, scrape.state, &pane);
+        if let Some(next) = reconciled {
+            tracing::info!(session = %s.id, from = %s.state, to = %next, source = %s.state_source, "flow: the pane overruled the last hook");
+            if s.state == SessionState::NeedsYou {
+                self.release_pending(&s.id);
+            }
+            if next == SessionState::Idle && s.state != SessionState::Starting {
+                self.with_store(|st| st.set_unread(&s.id, true))?;
+            }
+            self.set_state(&s.id, next, None)?;
+        }
         match scrape.state {
+            _ if reconciled.is_some() => {}
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
                 if !recently_resumed {
@@ -3258,12 +3353,18 @@ impl Engine {
             }
             PaneState::AwaitingApproval => {
                 if s.state != SessionState::NeedsYou && !self.has_pending(&s.id) {
+                    let reason = scrape.reason.as_deref().unwrap_or("permission");
+                    let what = if reason == "permission" { "approval prompt" } else { "dialog" };
                     let detail = scrape
                         .rule
                         .as_deref()
-                        .map_or_else(|| "approval prompt on screen".to_string(), |r| format!("approval prompt on screen ({r})"));
-                    let mut att = Attention::new("permission").with_detail(detail);
-                    att.request_id = Some(format!("scrape-{}", uuid::Uuid::new_v4().simple()));
+                        .map_or_else(|| format!("{what} on screen"), |r| format!("{what} on screen ({r})"));
+                    let mut att = Attention::new(reason).with_detail(detail);
+                    // A dialog is answered, not approved: its first option may be
+                    // "No, exit", so no id offers it as a one-tap approval.
+                    if reason == "permission" {
+                        att.request_id = Some(format!("scrape-{}", uuid::Uuid::new_v4().simple()));
+                    }
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
             }
@@ -3290,7 +3391,43 @@ impl Engine {
             self.rt().paste_at.remove(&s.id);
             self.send(&s.id, &p)?;
         }
-        Ok(())
+        self.publish_confidence(&s.id)
+    }
+
+    /// One pane read against the row (see `status::reconcile`). Rows only
+    /// the pane speaks for keep their immediate path below; asks are here for
+    /// both, since a question carries no `scrape-` id to clear it by.
+    fn reconcile_with_pane(&self, s: &Session, hooks_seen: bool, verdict: PaneState, pane: &str) -> Option<SessionState> {
+        let now = Instant::now();
+        let (sustained, quiet, since_hook, ask) = {
+            let mut rt = self.rt();
+            let t = rt.status.entry(s.id.clone()).or_default();
+            let sustained = t.observe(verdict, now);
+            let quiet = t.observe_text(pane, now);
+            t.confirm_from_pane(s.state, verdict, quiet, now);
+            (sustained, quiet, t.since_hook(now), t.ask(now))
+        };
+        let asking = s.state == SessionState::NeedsYou && s.attention.as_ref().is_some_and(|a| a.reason == "permission" || a.reason == "question");
+        if !(asking || (hooks_seen && s.state != SessionState::NeedsYou)) {
+            return None;
+        }
+        crate::status::reconcile(&crate::status::Reading {
+            state: s.state,
+            verdict,
+            sustained,
+            quiet,
+            since_hook,
+            ask,
+        })
+    }
+
+    /// The prompt behind a long-polling `PermissionRequest` was answered at
+    /// the terminal: stop holding the hook open. It replies with no decision.
+    fn release_pending(&self, session_id: &str) {
+        let mut pending = self.inner.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for p in pending.values_mut().filter(|p| p.session_id == session_id) {
+            p.tx = None;
+        }
     }
 
     /// The daemon is shutting down cleanly (th-0937a1): record it, so the next
@@ -3925,6 +4062,7 @@ mod tests {
             host: crate::host::default_host(),
             pty_host: None,
             new_host: HostKind::Tmux,
+            status_windows: crate::status::StatusWindows::default(),
         })
         .unwrap()
     }

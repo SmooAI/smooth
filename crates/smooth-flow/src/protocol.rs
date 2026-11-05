@@ -711,6 +711,8 @@ mod tests {
             adopted: false,
             host: crate::host::HostKind::Tmux,
             title_pinned: false,
+            confidence: crate::status::Confidence::default(),
+            confirmed_at: None,
         }
     }
 

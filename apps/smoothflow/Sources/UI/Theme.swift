@@ -26,7 +26,8 @@ enum Theme {
 
     /// Sidebar dot: teal working, amber needs you / limited, ink done, grey idle.
     static func dot(for s: Session) -> Color {
-        switch s.state {
+        if s.confidence != .confirmed { return Color(faint) }
+        return switch s.state {
         case .working, .starting: Color(teal)
         case .needsYou, .limited: Color(amber)
         case .done: Color(ink)
@@ -37,6 +38,16 @@ enum Theme {
     }
 
     static func stateLabel(_ s: Session) -> String {
+        // A state nothing has confirmed lately is what the row last was.
+        if s.confidence != .confirmed { return currentStateLabel(s) + "?" }
+        // An ask waits as long as it takes; show how long that has been.
+        if s.state == .needsYou, let since = s.attention?.since, !relative(since).isEmpty {
+            return currentStateLabel(s) + " · " + relative(since)
+        }
+        return currentStateLabel(s)
+    }
+
+    private static func currentStateLabel(_ s: Session) -> String {
         switch s.state {
         case .starting: "starting"
         case .working: "working"
