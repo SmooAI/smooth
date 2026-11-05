@@ -1359,8 +1359,10 @@ enum ApiCommands {
     /// Smoo AI auth clients ("API keys") — mint and manage both
     /// machine-to-machine (M2M, server/CI secret) and browser-to-machine
     /// (B2M, origin-restricted publishable key) clients: list, create
-    /// (`--type m2m|b2m`, `--allowed-origin` for B2M), update a B2M
-    /// client's origins, rotate, and revoke.
+    /// (`--name`, `--type m2m|b2m`, `--expires-in-days`, `--origin` for
+    /// B2M), rename/update, disable/enable, rotate in place with an
+    /// overlap, revoke, and the org kill switch (`disable-all` /
+    /// `enable-all`).
     ///
     /// These routes require a dashboard **user** session (`th auth
     /// login`) — they 403 under M2M. A master admin can target a child
@@ -8507,6 +8509,8 @@ mod cli_dispatch_tests {
         const GATED: &[&[&str]] = &[
             // Kill the live key.
             &["smoo", "api", "keys", "rotate"],
+            // Org kill switch: every integration's key at once.
+            &["smoo", "api", "keys", "disable-all"],
             &["smoo", "llm", "rotate-key"],
             &["smoo", "llm", "keys", "rotate"],
             // Change other people's access.
