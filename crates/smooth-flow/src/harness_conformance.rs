@@ -200,6 +200,9 @@ pub struct FakeSpec {
     /// ([`key_bytes`]) off the pane when it asks permission by screen.
     #[serde(default)]
     pub approve_keys: Vec<String>,
+    /// `[state.hooks] hold_permission`: when false the permission hook replies
+    /// at once and the prompt is answered with `approve_keys`.
+    pub hold_permission: bool,
     /// JSON-lines log of what the fake saw and did.
     pub log: PathBuf,
 }
@@ -341,6 +344,7 @@ impl FakeSpec {
             needs_you: screens.needs_you.unwrap_or_else(|| DEFAULT_NEEDS_YOU.to_string()),
             work_ms: 2000,
             approve_keys: m.steer.approve_keys.clone(),
+            hold_permission: m.state.hooks.hold_permission,
             log,
         })
     }

@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(t.observe_text("idle ⠦", t0), None);
         assert_eq!(t.observe_text("idle ⠇", t0 + SECS(5)), Some(SECS(5)));
         assert_eq!(t.observe_text("idle more ⠇", t0 + SECS(6)), Some(Duration::ZERO));
-        assert_eq!(t.observe_text("idle more", t0 + SECS(7)), Some(SECS(1)));
+        assert_eq!(t.observe_text("idle more ⠦", t0 + SECS(7)), Some(SECS(1)));
     }
 
     #[test]

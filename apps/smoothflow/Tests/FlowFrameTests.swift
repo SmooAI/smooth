@@ -52,9 +52,6 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertFalse(h[3].isDegraded)
     }
 
-    /// SMOODEV-4238: a `pty` session's host answers terminal queries, so its
-    /// surface mirrors (libghostty's own answers are suppressed). A row from an
-    /// older engine has no `host` and is tmux: the surface answers, as before.
     /// SMOODEV-4268: how far a row can be believed, and how long an ask has waited.
     func testConfidenceAndAttentionSince() throws {
         let stale = try JSONDecoder().decode(Session.self, from: Data(#"{"id":"a","state":"working","confidence":"stale"}"#.utf8))
@@ -70,6 +67,9 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertTrue(Theme.stateLabel(asked).hasPrefix("question · "), Theme.stateLabel(asked))
     }
 
+    /// SMOODEV-4238: a `pty` session's host answers terminal queries, so its
+    /// surface mirrors (libghostty's own answers are suppressed). A row from an
+    /// older engine has no `host` and is tmux: the surface answers, as before.
     func testSessionHostDecidesWhoAnswersTerminalQueries() throws {
         guard case let .session(pty) = try decode(#"{"type":"flow.session","session":{"id":"fs-1","state":"idle","host":"pty"}}"#) else { return XCTFail() }
         XCTAssertEqual(pty.host, "pty")
