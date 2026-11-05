@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host::HostKind;
 use crate::protocol::{EventKind, FlowEvent};
+use crate::remote::RemoteTarget;
 
 /// Where the flow database lives: `$SMOOTH_FLOW_DB`, else `~/.smooth/flow.db`.
 #[must_use]
@@ -283,6 +284,12 @@ pub struct Session {
     /// ahead of the pearl id. Off the wire when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_pinned: bool,
+    /// SMOODEV-4269: the session runs on another machine over `ssh`. `argv` is
+    /// then what runs there, `worktree` is empty (there is no local one), and
+    /// `project` is `ssh://<host>`. See [`crate::remote`]. Off the wire when
+    /// local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteTarget>,
     /// How far `state` can be believed right now (SMOODEV-4268, `status.rs`).
     /// Computed, not stored: `stale` / `unknown` rows must not read as live.
     #[serde(default)]
@@ -323,6 +330,8 @@ pub struct NewSession {
     pub adopted: bool,
     /// See [`Session::host`]; `None` writes NULL, which reads as tmux.
     pub host: Option<HostKind>,
+    /// See [`Session::remote`].
+    pub remote: Option<RemoteTarget>,
 }
 
 /// Mint a session id: `fs-` + 8 hex.
@@ -561,6 +570,13 @@ impl FlowStore {
                 .context("add title_pinned")?;
             conn.execute("ALTER TABLE sessions ADD COLUMN auto_title TEXT", []).context("add auto_title")?;
         }
+        let has_remote = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'remote'")?
+            .exists([])
+            .context("probe remote column")?;
+        if !has_remote {
+            conn.execute("ALTER TABLE sessions ADD COLUMN remote TEXT", []).context("add remote")?;
+        }
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
             .context("index hook_token_hash")?;
         Ok(Self { conn })
@@ -647,6 +663,7 @@ impl FlowStore {
             adopted: row.get::<_, i64>("adopted")? != 0,
             host: row.get::<_, Option<String>>("host")?.as_deref().and_then(HostKind::parse).unwrap_or_default(),
             title_pinned: row.get::<_, i64>("title_pinned")? != 0,
+            remote: row.get::<_, Option<String>>("remote")?.and_then(|r| serde_json::from_str(&r).ok()),
         })
     }
 
@@ -671,8 +688,8 @@ impl FlowStore {
         self.conn
             .execute(
                 "INSERT INTO sessions (id, kind, title, project, worktree, branch, pearl_id, agent_session_id, argv, tmux_session,
-                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner, adopted, host)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14, ?15, ?16)",
+                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner, adopted, host, remote)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     id,
                     kind.as_str(),
@@ -690,6 +707,7 @@ impl FlowStore {
                     new.owner,
                     i64::from(new.adopted),
                     new.host.map(HostKind::as_str),
+                    new.remote.as_ref().map(serde_json::to_string).transpose()?,
                 ],
             )
             .context("insert session")?;

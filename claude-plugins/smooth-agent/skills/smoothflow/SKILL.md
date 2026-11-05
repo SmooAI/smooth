@@ -32,6 +32,7 @@ start a daemon yourself.
 4. **Start it.**
     - `flow_new` / `th flow new --kind claude --worktree <dir> --prompt "…" --title "…" --json`.
     - With `--pearl <id>` and no `--worktree`, the engine creates `../<repo>-<pearl>-<slug>` on a new branch.
+    - On another machine: `th flow new --kind claude --ssh <host> --remote-cwd <dir>`, or `ssh_host` and `remote_directory` on `flow_new`. It uses the system `ssh`, and the harness must be installed there. State comes from the screen, so there are no approval prompts. The remote program usually ends if the connection drops, and a lost agent waits as `restorable` for the user to resume it.
     - Keep the returned session id.
 5. **Drive it.**
     - `flow_prompt_wait` sends a prompt and blocks until the turn ends (idle, needs you, limited, done). It returns the final state and the tail of the screen. It **refuses** while the agent is waiting on an approval, so handle that first.

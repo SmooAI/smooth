@@ -26,6 +26,7 @@ pub mod protocol;
 pub mod pty;
 #[cfg(all(unix, feature = "pty-host"))]
 pub mod pty_host;
+pub mod remote;
 pub mod replies;
 pub mod repos;
 pub mod restore;
@@ -45,6 +46,7 @@ pub use infer::{infer, Inferred};
 pub use protocol::{ClientFrame, CloseOutcome, DaemonInfo, Decision, HookEvent, ReplayReason, ServerFrame};
 #[cfg(all(unix, feature = "pty-host"))]
 pub use pty_host::PtyHost;
+pub use remote::RemoteTarget;
 /// The session host's headless terminal, for callers (and tests) that
 /// replay its snapshots.
 #[cfg(feature = "pty-host")]

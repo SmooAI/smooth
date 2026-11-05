@@ -58,7 +58,12 @@ enum Theme {
         case .starting: "starting"
         case .working: "working"
         case .idle: s.attention?.reason == .held ? "held" : "idle"
-        case .needsYou: s.attention?.reason == .question ? "question" : "approve"
+        case .needsYou:
+            switch s.attention?.reason {
+            case .question: "question"
+            case .restorable: "resume?"
+            default: "approve"
+            }
         case .limited: "limit" + (s.attention?.resumeDate.map { " · \(AttentionNotifier.timeFormatter.string(from: $0))" } ?? "")
         case .done: "done"
         case .dead: "dead"

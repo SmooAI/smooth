@@ -54,7 +54,7 @@ Timestamps: UTC RFC3339 text, compared with Rust `Utc::now()` literals, never SQ
 - `flow.input` `{id, data_b64}`
 - `flow.resize` `{id, cols, rows}`
 - `flow.snapshot` `{id}`
-- `flow.new` `{kind, worktree|null, project|null, pearl_id|null, prompt|null, argv|null, title|null}` → reply `flow.session`. For `kind:"claude"` with no argv the engine launches `claude --session-id <uuid> [prompt]` under smooth-tmux in the worktree (creating the worktree via `th worktree create` when `pearl_id` is set and `worktree` is null: `../<repo>-<pearl>-<slug>`).
+- `flow.new` `{kind, worktree|null, project|null, pearl_id|null, prompt|null, argv|null, title|null, remote|null}` → reply `flow.session`. `remote` is `{host, cwd?}`: over the system `ssh`, with `worktree`, `project` and `pearl_id` null (SMOODEV-4269). For `kind:"claude"` with no argv the engine launches `claude --session-id <uuid> [prompt]` under smooth-tmux in the worktree (creating the worktree via `th worktree create` when `pearl_id` is set and `worktree` is null: `../<repo>-<pearl>-<slug>`).
 - `flow.send` `{id, text}` — steer: text + Enter into the agent's prompt (tmux bracketed paste), NOT raw bytes.
 - `flow.approve` `{id, request_id, decision:"allow"|"deny"|"allow_session"}` — answers a permission attention. For hook-reported permission requests the engine replies to the hook's pending HTTP request; for scraped ones it sends the keystroke.
 - `flow.kill` `{id, resume:bool}` — kill the pid tree; if `resume`, relaunch with `claude --resume <agent_session_id>` (duplicate-resume guard: refuse if another live pid owns that session id).

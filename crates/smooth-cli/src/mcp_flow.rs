@@ -80,6 +80,12 @@ pub struct FlowNewArgs {
     /// Model override for the harness.
     #[serde(default)]
     pub model: Option<String>,
+    /// Run on this machine over the system ssh instead of here: a ~/.ssh/config alias or [user@]host. Excludes directory and pearl_id. The harness must be installed there; state comes from reading the screen, and the remote program usually ends if the connection drops.
+    #[serde(default)]
+    pub ssh_host: Option<String>,
+    /// With ssh_host: the directory on that machine (~ is its home). Default: the remote login directory.
+    #[serde(default)]
+    pub remote_directory: Option<String>,
 }
 
 /// Arguments for `flow_send` / `flow_prompt_wait`.
@@ -300,7 +306,7 @@ impl SmoothMcp {
     )]
     pub async fn flow_new(&self, params: Parameters<FlowNewArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        let body = json!({
+        let mut body = json!({
             "kind": a.kind.as_deref().unwrap_or("claude"),
             "worktree": a.directory,
             "pearl_id": a.pearl_id,
@@ -308,6 +314,9 @@ impl SmoothMcp {
             "title": a.title,
             "model": a.model,
         });
+        if let Some(host) = &a.ssh_host {
+            body["remote"] = json!({ "host": host, "cwd": a.remote_directory });
+        }
         let v = call(Method::POST, "/api/flow/sessions", Some(body)).await?;
         let sess = v.get("session").cloned().unwrap_or(Value::Null);
         Ok(format!("Started {}\n{}", s(&sess, "id"), session_line(&sess)))

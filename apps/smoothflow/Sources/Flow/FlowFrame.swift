@@ -15,7 +15,7 @@ enum SessionState: String, Codable, Equatable {
 }
 
 enum AttentionReason: String, Codable, Equatable {
-    case permission, question, usageLimit = "usage_limit", crashed, held, unknown
+    case permission, question, usageLimit = "usage_limit", crashed, held, restorable, unknown
 
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
@@ -93,11 +93,14 @@ struct Session: Codable, Equatable, Identifiable {
     /// SMOODEV-4127: `title` is a name someone gave the session (⌘⇧R), so it
     /// is the tab's name whatever else the row says.
     var titlePinned: Bool
+    /// SMOODEV-4269: the session runs on another machine over ssh. `argv` is
+    /// then what runs there, and `worktree` is empty.
+    var remote: RemoteTarget?
     /// `stale` / `unknown`: the state is what the row last was, not what it is.
     var confidence: Confidence
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread, host, confidence
+        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread, host, remote, confidence
         case titlePinned = "title_pinned"
         case pearlId = "pearl_id", agentSessionId = "agent_session_id", tmuxSession = "tmux_session"
         case fanOutId = "fan_out_id", createdAt = "created_at", updatedAt = "updated_at", endedAt = "ended_at", exitCode = "exit_code"
@@ -107,11 +110,12 @@ struct Session: Codable, Equatable, Identifiable {
          pearlId: String? = nil, agentSessionId: String? = nil, argv: [String] = [], tmuxSession: String? = nil, pid: Int? = nil,
          state: SessionState = .idle, attention: Attention? = nil, fanOutId: String? = nil, createdAt: String = "", updatedAt: String = "",
          endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false, host: String? = nil, titlePinned: Bool = false,
-         confidence: Confidence = .confirmed) {
+         remote: RemoteTarget? = nil, confidence: Confidence = .confirmed) {
         self.id = id; self.kind = kind; self.title = title; self.project = project; self.worktree = worktree; self.branch = branch
         self.pearlId = pearlId; self.agentSessionId = agentSessionId; self.argv = argv; self.tmuxSession = tmuxSession; self.pid = pid
         self.state = state; self.attention = attention; self.fanOutId = fanOutId; self.createdAt = createdAt; self.updatedAt = updatedAt
         self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread; self.host = host; self.titlePinned = titlePinned
+        self.remote = remote
         self.confidence = confidence
     }
 
@@ -147,6 +151,14 @@ struct Session: Codable, Equatable, Identifiable {
         host = try c.decodeIfPresent(String.self, forKey: .host)
         titlePinned = try c.decodeIfPresent(Bool.self, forKey: .titlePinned) ?? false
         confidence = try c.decodeIfPresent(Confidence.self, forKey: .confidence) ?? .confirmed
+        remote = try c.decodeIfPresent(RemoteTarget.self, forKey: .remote)
+    }
+
+    /// The header's "where": `ssh box:/srv`, else the directory the terminal
+    /// reported, else the worktree. A remote row's local cwd means nothing.
+    func whereItRuns(reportedPwd: String?) -> String {
+        if let remote { return "ssh \(remote.label)" }
+        return reportedPwd ?? worktree
     }
 
     /// The session host answers the program's terminal queries itself
@@ -673,12 +685,15 @@ struct NewSession: Equatable {
     /// SMOODEV-4111: start in this session's LIVE working directory (the
     /// engine asks tmux) when `worktree` is nil — how a split opens beside you.
     var cwdOf: String?
+    /// SMOODEV-4269: run on another machine over ssh; `worktree` stays nil.
+    var remote: RemoteTarget?
 
     var fields: [String: Any] {
         var f: [String: Any] = ["kind": kind, "worktree": worktree as Any, "project": project as Any, "pearl_id": pearlId as Any,
                                 "prompt": prompt as Any, "argv": argv as Any, "title": title as Any]
         // Additive and off the wire when unset, so older engines see the frame unchanged.
         if let cwdOf { f["cwd_of"] = cwdOf }
+        if let remote { f["remote"] = remote.fields }
         return f
     }
 }

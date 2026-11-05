@@ -77,6 +77,10 @@ pub enum ClientFrame {
         /// when unset, so older engines and clients see the frame unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd_of: Option<String>,
+        /// Additive (SMOODEV-4269): run on this host over the system `ssh`
+        /// instead of here. Excludes `worktree`, `project` and `pearl_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<crate::remote::RemoteTarget>,
     },
     #[serde(rename = "flow.send")]
     Send { id: String, text: String },
@@ -711,6 +715,7 @@ mod tests {
             adopted: false,
             host: crate::host::HostKind::Tmux,
             title_pinned: false,
+            remote: None,
             confidence: crate::status::Confidence::default(),
             confirmed_at: None,
         }
@@ -754,6 +759,7 @@ mod tests {
                 title: None,
                 tmux_socket: Some("smoothflow".into()),
                 cwd_of: None,
+                remote: None,
             },
             ClientFrame::New {
                 kind: SessionKind::Shell,
@@ -765,6 +771,10 @@ mod tests {
                 title: None,
                 tmux_socket: None,
                 cwd_of: Some("fs-0123abcd".into()),
+                remote: Some(crate::remote::RemoteTarget {
+                    host: "box".into(),
+                    cwd: Some("~/api".into()),
+                }),
             },
             ClientFrame::Send {
                 id: "a".into(),

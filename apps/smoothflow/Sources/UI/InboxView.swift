@@ -95,6 +95,13 @@ struct InboxView: View {
                     Button("Resume") { app.kill(s, resume: true) }
                     Button("Open session") { app.focus(s.id); app.toggleInbox() }
                 }
+            case .restorable:
+                title("Waiting for you to resume it", s)
+                Text(a?.detail ?? "").font(.caption)
+                HStack {
+                    Button("Resume") { app.kill(s, resume: true) }
+                    Button("Open session") { app.focus(s.id); app.toggleInbox() }
+                }
             default:
                 title("Needs you", s)
                 HStack { Button("Open session") { app.focus(s.id); app.toggleInbox() } }

@@ -28,6 +28,7 @@ use crate::protocol::{
     FlowEvent, HookEvent, HookOutcome, ReplayReason, ServerFrame,
 };
 use crate::pty::OnOutput;
+use crate::remote::RemoteTarget;
 use crate::restore::{RESTORABLE, RESTORE_STAGGER, RESTORING};
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
 use crate::{diff, limit, tmux};
@@ -178,6 +179,10 @@ pub struct NewRequest {
     /// when `worktree` is not given. How SmoothFlow's split opens a new
     /// shell beside the pane you are in.
     pub cwd_of: Option<String>,
+    /// SMOODEV-4269: run on another machine over `ssh` ([`crate::remote`]).
+    /// A `cwd_of` naming a remote session sets this to that session's target,
+    /// so a split of a remote pane stays on its host.
+    pub remote: Option<RemoteTarget>,
 }
 
 /// What `POST /api/flow/hooks` should do after the engine processed a hook.
@@ -621,6 +626,22 @@ pub fn slugify(s: &str, max: usize) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// Why a remote agent waits for the user instead of being resumed.
+fn remote_not_resumed(r: &RemoteTarget) -> String {
+    format!(
+        "not resumed automatically, it may still be running on {}; Kill & Resume when the link is back",
+        r.host
+    )
+}
+
+/// The engine reads diffs off a local worktree, and a remote row has none.
+fn refuse_remote_diff(s: &Session) -> Result<()> {
+    match &s.remote {
+        Some(r) => bail!("session {} runs on {}: diffs are only available for local sessions", s.id, r.host),
+        None => Ok(()),
+    }
+}
+
 /// The login shell argv for `kind = shell`.
 fn shell_argv() -> Vec<String> {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
@@ -731,6 +752,12 @@ pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<
 }
 
 /// The main checkout a `flow.new` request is for.
+/// Whether this manifest can tell us the composer is up, so a pasted prompt can
+/// wait for it.
+fn can_see_idle(m: &Manifest) -> bool {
+    !m.state.scrape.idle.is_empty() || m.state.scrape.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
+}
+
 fn request_project(req: &NewRequest, default_project: &Path) -> PathBuf {
     req.project
         .as_deref()
@@ -1614,6 +1641,7 @@ impl Engine {
     /// Unknown session, a session outside a repo, or git refusing.
     pub fn diff(&self, id: &str, base: diff::DiffBase, path: Option<&str>) -> Result<diff::Diff> {
         let s = self.require(id)?;
+        refuse_remote_diff(&s)?;
         let snaps = self.snapshots(id)?;
         diff::compute(Path::new(&s.worktree), base, &snaps, path)
     }
@@ -1624,6 +1652,7 @@ impl Engine {
     /// `stale:` when the hunk is gone or no longer applies; nothing written.
     pub fn diff_action(&self, id: &str, base: diff::DiffBase, hunk_id: &str, action: diff::HunkAction) -> Result<diff::ActionOutcome> {
         let s = self.require(id)?;
+        refuse_remote_diff(&s)?;
         // Serialised with the turn snapshots and hooks of this session.
         let lock = self.session_lock(id);
         let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1780,6 +1809,9 @@ impl Engine {
     /// When the worktree can't be resolved/created or tmux refuses.
     pub fn new_session(&self, mut req: NewRequest) -> Result<Session> {
         let opened = Instant::now();
+        if let Some(s) = self.open_if_remote(&mut req)? {
+            return Ok(s);
+        }
         if !req.kind.is_agent() {
             return self.open_shell(req);
         }
@@ -1808,6 +1840,11 @@ impl Engine {
         if !req.kind.is_agent() {
             return self.new_session(req);
         }
+        // Starting `ssh` is as quick as starting a shell, and there is no
+        // worktree or inference to wait for, so this one needs no thread.
+        if let Some(s) = self.open_if_remote(&mut req)? {
+            return Ok(s);
+        }
         let opening = self.plan_agent(&mut req)?;
         let session = opening.session.clone();
         let e = self.clone();
@@ -1821,6 +1858,16 @@ impl Engine {
             return Err(self.launch_failed(&session.id, None, anyhow!(err).context("start the launch thread")));
         }
         Ok(session)
+    }
+
+    /// Open `req` over `ssh` if it asks for that, or if it splits a pane that
+    /// runs there. Both `flow.new` paths come through here, whatever the kind.
+    fn open_if_remote(&self, req: &mut NewRequest) -> Result<Option<Session>> {
+        self.resolve_cwd_of(req)?;
+        match req.remote.clone() {
+            Some(remote) => self.new_remote(req, &remote).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// `flow.new {kind: shell}`: resolve the worktree, then [`Self::new_shell`].
@@ -1916,14 +1963,14 @@ impl Engine {
                 fan_out_id: req.fan_out_id.clone(),
                 adopted: false,
                 host: Some(self.inner.new_host),
+                remote: None,
             })
         })?;
         self.rt().launching.insert(session.id.clone(), PendingOpen::default());
         self.emit_session(&session);
         crate::timing::stage(&session.id, "row", t);
         let env = self.launch_env(Some(manifest), &session);
-        // Wait for the composer only when this manifest can tell us it is up.
-        let can_see_idle = !manifest.state.scrape.idle.is_empty() || manifest.state.scrape.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle);
+        let can_see_idle = can_see_idle(manifest);
         Ok(Opening {
             kind: req.kind.clone(),
             prompt: req.prompt.clone(),
@@ -2076,6 +2123,73 @@ impl Engine {
         }
     }
 
+    /// `flow.new {remote}` (SMOODEV-4269): a row whose process is a local
+    /// `ssh`. The harness binary is the manifest's bare name, resolved on the
+    /// remote `PATH`, so this machine needs none of it. There is no local
+    /// worktree, no pearl and no hooks: state comes from reading the screen.
+    fn new_remote(&self, req: &NewRequest, remote: &RemoteTarget) -> Result<Session> {
+        let remote = RemoteTarget::new(&remote.host, remote.cwd.as_deref())?;
+        if req.worktree.is_some() || req.project.is_some() || req.pearl_id.is_some() || req.fan_out_id.is_some() {
+            bail!("a remote session has no local worktree, project, pearl or fan-out; give it a remote directory instead");
+        }
+        let registry = self.registry();
+        let explicit = req.argv.clone().filter(|a| !a.is_empty());
+        let prompt = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty());
+        let (manifest, agent_session_id, argv, title) = if req.kind.is_agent() {
+            let m = manifest_for(&registry, &req.kind)?;
+            if m.state.source == StateSource::Native {
+                bail!("{} reports its turns to a local daemon, so it can't run over SSH yet", m.name);
+            }
+            let id = (m.launch.session_id == SessionIdMode::Preassigned).then(|| uuid::Uuid::new_v4().to_string());
+            let paste = m.launch.prompt_as == PromptAs::Paste;
+            let vars = Vars {
+                prompt: if paste { None } else { prompt },
+                session_id: id.as_deref(),
+                cwd: remote.cwd.as_deref(),
+                model: req.model.as_deref(),
+                daemon_url: None,
+            };
+            let argv = explicit.unwrap_or_else(|| {
+                let mut v = vec![m.binary.names[0].clone()];
+                v.extend(crate::harness::render_argv(&m.launch.argv, &vars));
+                v
+            });
+            let title = default_title(&req.kind, prompt, None, None, Path::new(&remote.host));
+            (Some(m), id, argv, title)
+        } else {
+            (None, None, explicit.unwrap_or_default(), remote.label())
+        };
+        let session = self.with_store(|st| {
+            st.create(NewSession {
+                kind: Some(req.kind.clone()),
+                title,
+                project: remote.project(),
+                worktree: String::new(),
+                agent_session_id,
+                argv: argv.clone(),
+                tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(|| self.default_socket())),
+                owner: Some(self.default_socket()),
+                host: Some(self.inner.new_host),
+                remote: Some(remote.clone()),
+                ..Default::default()
+            })
+        })?;
+        let session = self.launch(&session, &argv, &[])?;
+        if let Some(t) = req.title.as_deref() {
+            self.with_store(|st| st.rename(&session.id, Some(t)))?;
+            self.emit_session(&self.require(&session.id)?);
+        }
+        let Some(m) = manifest else {
+            // Ready as far as the engine can tell: a login prompt is in the pane.
+            return Ok(self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session));
+        };
+        if let (true, Some(p)) = (m.launch.prompt_as == PromptAs::Paste, prompt) {
+            self.schedule_paste(&session.id, p.to_string(), can_see_idle(m));
+        }
+        self.watch_boot(&session.id);
+        self.require(&session.id)
+    }
+
     /// `flow.new {kind: shell}` (SMOODEV-4127): as fast as a terminal. A
     /// pre-warmed spare in this directory is claimed when there is one; the
     /// pearl is inferred off the request path (a `th` call is ~100 ms); the
@@ -2101,6 +2215,7 @@ impl Engine {
             fan_out_id: req.fan_out_id.clone(),
             adopted: false,
             host: Some(self.inner.new_host),
+            remote: None,
         };
         let claimable = req.argv.is_none() && req.fan_out_id.is_none();
         let spare = if claimable { self.claim_spare(worktree, &socket) } else { None };
@@ -2221,6 +2336,8 @@ impl Engine {
         }
         let dir = match (worktree, cwd_of) {
             (Some(w), _) => PathBuf::from(w),
+            // The next split of a remote pane is a new `ssh`: nothing to warm.
+            (None, Some(id)) if self.require(id)?.remote.is_some() => return Ok(()),
             (None, Some(id)) => self.live_cwd(id)?,
             (None, None) => self.inner.default_project.clone(),
         };
@@ -2359,7 +2476,8 @@ impl Engine {
             self.rt().titler.forget(&s.id);
             return;
         }
-        if s.title_pinned {
+        // A remote row's local facts describe `ssh`, not what is running there.
+        if s.title_pinned || s.remote.is_some() {
             return;
         }
         let Ok(target) = self.pane(s) else { return };
@@ -2378,9 +2496,15 @@ impl Engine {
     /// `cwd_of` becomes the request's worktree. An explicit worktree (or a
     /// pearl, which makes one) wins over it.
     fn resolve_cwd_of(&self, req: &mut NewRequest) -> Result<()> {
-        if req.worktree.is_none() && req.pearl_id.is_none() {
+        if req.remote.is_none() && req.worktree.is_none() && req.pearl_id.is_none() {
             if let Some(of) = req.cwd_of.as_deref() {
-                req.worktree = Some(self.live_cwd(of)?.to_string_lossy().into_owned());
+                // A remote pane's split stays on its host, in the directory
+                // that session started in: its live directory is not visible
+                // from here.
+                match self.require(of)?.remote {
+                    Some(remote) => req.remote = Some(remote),
+                    None => req.worktree = Some(self.live_cwd(of)?.to_string_lossy().into_owned()),
+                }
             }
         }
         Ok(())
@@ -2419,8 +2543,15 @@ impl Engine {
         if host.alive(&target) {
             host.kill_session(&target);
         }
-        let mut env = env.to_vec();
-        if session.kind.is_agent() {
+        // A remote row: the local process is `ssh`, and nothing local reaches
+        // the far side. Hooks can't come back, so no token is minted; manifest
+        // variables name this machine's paths and daemon.
+        let mut env = if session.remote.is_some() {
+            vec![("TERM".to_string(), crate::remote::REMOTE_TERM.to_string())]
+        } else {
+            env.to_vec()
+        };
+        if session.kind.is_agent() && session.remote.is_none() {
             // th-91d032: every launch gets a fresh hook token; the previous
             // launch's stops working here.
             if let Some(path) = self.issue_hook_token(&session.id) {
@@ -2438,12 +2569,16 @@ impl Engine {
         }
         let prefix = self.exit_prefix(&session.id);
         let cwd = self.launch_dir(session);
+        let wrapped = match session.remote.as_ref().map(|r| r.ssh_argv(argv)).transpose() {
+            Ok(w) => w,
+            Err(err) => return Err(self.launch_failed(&session.id, None, err)),
+        };
         let host_asked = Instant::now();
         let launched = host.launch(
             &target,
             &Launch {
                 cwd: &cwd,
-                argv,
+                argv: wrapped.as_deref().unwrap_or(argv),
                 env: &env,
                 exit_prefix: Some(&prefix),
             },
@@ -3076,8 +3211,14 @@ impl Engine {
             // Rule 4: attached clients move to the new host's terminal.
             self.schedule_replay(&launched.id, ReplayReason::Host);
         }
-        self.set_state(&launched.id, SessionState::Starting, None)?
-            .ok_or_else(|| anyhow!("no such session"))
+        // A remote shell has no hooks and nothing to scrape, so nothing would
+        // ever move it on from `starting`. It is ready as far as we can tell.
+        let next = if s.remote.is_some() && !s.kind.is_agent() {
+            SessionState::Idle
+        } else {
+            SessionState::Starting
+        };
+        self.set_state(&launched.id, next, None)?.ok_or_else(|| anyhow!("no such session"))
     }
 
     // ── hooks ─────────────────────────────────────────────────────────────
@@ -3304,6 +3445,7 @@ impl Engine {
                 fan_out_id: None,
                 adopted: true,
                 host: None,
+                remote: None,
             })?;
             Ok(Some((s, true)))
         })?;
@@ -3477,7 +3619,10 @@ impl Engine {
         let mine = self.default_socket();
         let Ok(rows) = self.with_store(FlowStore::list_live) else { return };
         let mut by_host: HashMap<HostKind, Vec<(String, SessionRef)>> = HashMap::new();
-        for s in rows.iter().filter(|s| !s.kind.is_agent() && !s.adopted && owned_here(s, &mine)) {
+        for s in rows
+            .iter()
+            .filter(|s| !s.kind.is_agent() && !s.adopted && s.remote.is_none() && owned_here(s, &mine))
+        {
             if let Some(t) = s.tmux_session.as_deref() {
                 by_host.entry(s.host).or_default().push((s.id.clone(), SessionRef::new(socket_of(s, &mine), t)));
             }
@@ -3499,6 +3644,9 @@ impl Engine {
     /// last seen in when that still exists (SMOODEV-4238), anything else in
     /// its worktree.
     fn launch_dir(&self, s: &Session) -> PathBuf {
+        if s.remote.is_some() {
+            return self.inner.home.clone();
+        }
         if !s.kind.is_agent() {
             if let Ok(Some(dir)) = self.with_store(|st| st.last_cwd(&s.id)) {
                 let dir = PathBuf::from(dir);
@@ -3844,6 +3992,13 @@ impl Engine {
             self.drop_pty(&s.id);
             self.revoke_hook_token(&s.id);
             self.clear_exit_files(&s.id);
+            if let (true, Some(r)) = (s.kind.is_agent(), &s.remote) {
+                // The far side may not have noticed yet; see `on_death`.
+                tracing::info!(session = %s.id, cause = ?why, "flow: interrupted remote agent — resuming it is the user's call");
+                let att = Attention::new(RESTORABLE).with_detail(format!("{}; {}", why.describe(), remote_not_resumed(r)));
+                self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
+                continue;
+            }
             if s.kind.is_agent() && !crate::restore::resume_continues(&s, &registry) {
                 tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session cannot be resumed — restorable");
                 let att = Attention::new(RESTORABLE).with_detail(format!("{}; {NOT_RESENT}", why.describe()));
@@ -3853,7 +4008,9 @@ impl Engine {
             let at = Instant::now() + RESTORE_STAGGER.saturating_mul(u32::try_from(due.len()).unwrap_or(u32::MAX));
             tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session — resuming");
             // A shell has no conversation: it reopens in its last directory.
-            let what = if s.kind.is_agent() {
+            let what = if let Some(r) = &s.remote {
+                format!("reconnecting to {}", r.host)
+            } else if s.kind.is_agent() {
                 "resuming its conversation".to_string()
             } else {
                 format!("reopening in {}", self.launch_dir(&s).display())
@@ -3908,6 +4065,20 @@ impl Engine {
         if exit == PaneExit::Unknown {
             let att = Attention::new("crashed").with_detail("exit status unknown — not resumed; it may have quit on purpose");
             self.set_state(&s.id, SessionState::Dead, Some(att))?;
+            return Ok(());
+        }
+        if let (PaneExit::Code(crate::remote::SSH_FAILED_EXIT), Some(r)) = (exit, &s.remote) {
+            self.rt().relaunch_at.remove(&s.id);
+            if s.kind.is_agent() {
+                // Never automatic: the remote agent can outlive the link until
+                // sshd notices, and resuming then puts a second process on one
+                // conversation. Retrying on a plane would only burn the budget.
+                let att = Attention::new(RESTORABLE).with_detail(format!("{}; {}", r.lost_detail(), remote_not_resumed(r)));
+                self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
+            } else {
+                let att = Attention::new("crashed").with_detail(format!("{}; the remote shell ended with it", r.lost_detail()));
+                self.set_state(&s.id, SessionState::Dead, Some(att))?;
+            }
             return Ok(());
         }
         if !s.kind.is_agent() {
@@ -3977,6 +4148,7 @@ impl Engine {
                 fan_out_id: Some(fo.id.clone()),
                 tmux_socket: None,
                 cwd_of: None,
+                remote: None,
             })?;
             sessions.push(s);
         }
@@ -8183,6 +8355,327 @@ quiet_ms = 300
     }
 
     // ── SMOODEV-4127: fast shells, pre-warming, tab names ─────────────
+
+    // ── remote sessions (SMOODEV-4269) ─────────────────────────────────────
+
+    fn remote_new(e: &Engine, kind: SessionKind, host: &str, cwd: Option<&str>, prompt: Option<&str>) -> Result<Session> {
+        e.new_session(NewRequest {
+            kind,
+            prompt: prompt.map(str::to_string),
+            remote: Some(RemoteTarget {
+                host: host.into(),
+                cwd: cwd.map(str::to_string),
+            }),
+            ..Default::default()
+        })
+    }
+
+    /// The app and the phones open sessions through `begin_session`: an agent
+    /// asked for over ssh must not fall into the local launch path.
+    #[test]
+    fn begin_session_runs_a_remote_agent_over_ssh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = e
+            .begin_session(NewRequest {
+                kind: SessionKind::Claude,
+                remote: Some(RemoteTarget { host: "box".into(), cwd: None }),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(s.remote.as_ref().map(|r| r.host.as_str()), Some("box"));
+        assert_eq!(s.worktree, "");
+        assert!(s.pid.is_some(), "launched before the reply, with no flow-open thread");
+        assert_eq!(host.session(&host_ref(&s)).unwrap().argv[0], "ssh");
+        let refused = e.begin_session(NewRequest {
+            kind: SessionKind::Claude,
+            remote: Some(RemoteTarget {
+                host: "-oProxyCommand=x".into(),
+                cwd: None,
+            }),
+            ..Default::default()
+        });
+        assert!(refused.is_err());
+    }
+
+    /// A split of a remote pane stays there, whichever path and kind opened it.
+    #[test]
+    fn begin_session_with_cwd_of_a_remote_pane_stays_on_its_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let source = remote_new(&e, SessionKind::Shell, "box", Some("/srv"), None).unwrap();
+        let s = e
+            .begin_session(NewRequest {
+                kind: SessionKind::Claude,
+                cwd_of: Some(source.id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(s.remote.as_ref().map(|r| r.cwd.as_deref()), Some(Some("/srv")));
+        assert_eq!(host.session(&host_ref(&s)).unwrap().argv[0], "ssh");
+    }
+
+    /// The local process is `ssh`; the row keeps what runs on the far side,
+    /// and shows up in the fleet like any other.
+    #[test]
+    fn a_remote_shell_is_a_fleet_row_running_ssh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = remote_new(&e, SessionKind::Shell, "box", Some("/srv/app"), None).unwrap();
+        assert_eq!(s.state, SessionState::Idle);
+        assert_eq!(s.title, "box:/srv/app");
+        assert_eq!(s.project, "ssh://box");
+        assert_eq!(s.worktree, "", "a remote row has no local worktree");
+        assert!(s.argv.is_empty(), "nothing explicit runs on the far side: its login shell does");
+        let fake = host.session(&host_ref(&s)).unwrap();
+        assert_eq!(fake.argv.first().map(String::as_str), Some("ssh"));
+        assert!(fake.argv.windows(2).any(|w| w[0] == "--" && w[1] == "box"), "{:?}", fake.argv);
+        assert_eq!(e.list().unwrap().iter().filter(|r| r.id == s.id).count(), 1);
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.remote, s.remote, "the target survives the store");
+        let wire = serde_json::to_value(&row).unwrap();
+        assert_eq!(wire["remote"]["host"], "box");
+        let local = fake_shell(&e, tmp.path(), &["sh"]);
+        assert!(
+            serde_json::to_value(&local).unwrap().get("remote").is_none(),
+            "a local row's frame is unchanged"
+        );
+    }
+
+    /// The engine is the gate: every client's value comes through here.
+    #[test]
+    fn the_engine_refuses_a_host_that_starts_with_a_dash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        for bad in ["-oProxyCommand=touch /tmp/pwned", "-J", "me@-x", "box;id", "me:hunter2@box", ""] {
+            let err = remote_new(&e, SessionKind::Shell, bad, None, None);
+            assert!(err.is_err(), "{bad:?} must be refused");
+            assert!(!format!("{:#}", err.unwrap_err()).contains("hunter2"));
+        }
+        assert!(e.list().unwrap().is_empty(), "a refused host leaves no row");
+        assert!(
+            host.calls().iter().all(|c| !c.starts_with("launch")),
+            "and nothing launched: {:?}",
+            host.calls()
+        );
+    }
+
+    /// A row in the store is re-checked at launch, before `ssh` ever runs.
+    #[test]
+    fn a_forged_row_fails_at_launch_instead_of_reaching_ssh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    title: "forged".into(),
+                    tmux_socket: Some(crate::host::fake::FAKE_SOCKET.into()),
+                    owner: Some(crate::host::fake::FAKE_SOCKET.into()),
+                    remote: Some(RemoteTarget {
+                        host: "-oProxyCommand=x".into(),
+                        cwd: None,
+                    }),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        assert!(e.launch(&s, &[], &[]).is_err());
+        assert!(host.calls().iter().all(|c| !c.starts_with("launch")), "{:?}", host.calls());
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Dead);
+    }
+
+    #[test]
+    fn a_remote_session_refuses_local_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let remote = Some(RemoteTarget { host: "box".into(), cwd: None });
+        for req in [
+            NewRequest {
+                worktree: Some("/w".into()),
+                remote: remote.clone(),
+                ..Default::default()
+            },
+            NewRequest {
+                pearl_id: Some("th-1".into()),
+                remote: remote.clone(),
+                ..Default::default()
+            },
+            NewRequest {
+                project: Some("/p".into()),
+                remote: remote.clone(),
+                ..Default::default()
+            },
+        ] {
+            assert!(e.new_session(req).is_err());
+        }
+        // th code posts its turns to this machine's daemon.
+        let err = remote_new(&e, "th-code".parse().unwrap(), "box", None, None).unwrap_err();
+        assert!(err.to_string().contains("local daemon"), "{err}");
+    }
+
+    /// No local binary, no token, no local env: the harness runs over there.
+    #[test]
+    fn a_remote_agent_uses_the_bare_binary_and_gets_no_hook_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = remote_new(&e, SessionKind::Claude, "box", Some("~/api"), Some("it's $(work)")).unwrap();
+        assert_eq!(s.argv[0], "claude", "resolved on the remote PATH");
+        assert!(s.argv.iter().any(|a| a == "it's $(work)"), "the row keeps the unquoted prompt: {:?}", s.argv);
+        assert_eq!(s.title, "it's $(work)");
+        let fake = host.session(&host_ref(&s)).unwrap();
+        assert_eq!(fake.argv[0], "ssh");
+        let remote_cmd = fake.argv.last().unwrap();
+        assert!(remote_cmd.starts_with("exec \"$SHELL\" -lc "), "{remote_cmd}");
+        assert!(remote_cmd.contains("claude"), "{remote_cmd}");
+        assert!(!remote_cmd.contains("$(work)'") || remote_cmd.contains(r"'\''"), "quoted: {remote_cmd}");
+        assert_eq!(fake.env.iter().find(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()), Some("xterm-256color"));
+        assert!(
+            !fake.env.iter().any(|(k, _)| k == crate::hook_auth::TOKEN_FILE_ENV),
+            "hooks can't come back: {:?}",
+            fake.env
+        );
+        assert!(!fake.env.iter().any(|(k, _)| k == FLOW_ID_ENV));
+    }
+
+    /// Resume keeps the same conversation id, through a fresh `ssh`.
+    #[test]
+    fn resuming_a_remote_agent_reconnects_with_its_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = remote_new(&e, SessionKind::Claude, "box", None, None).unwrap();
+        let agent = s.agent_session_id.clone().unwrap();
+        let s2 = e.kill(&s.id, true).unwrap();
+        let fake = host.session(&host_ref(&s2)).unwrap();
+        assert_eq!(fake.argv[0], "ssh");
+        let cmd = fake.argv.last().unwrap();
+        assert!(cmd.contains("--resume") && cmd.contains(&agent), "{cmd}");
+        assert_eq!(s2.argv[0], "claude", "the row still records the remote command");
+    }
+
+    /// A dropped link is said plainly, and an agent is never relaunched
+    /// behind the user's back: the old one may still be running there.
+    #[test]
+    fn a_lost_connection_is_reported_and_never_auto_resumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let agent = remote_new(&e, SessionKind::Claude, "box", None, None).unwrap();
+        let shell = remote_new(&e, SessionKind::Shell, "box", None, None).unwrap();
+        host.die(&host_ref(&agent), PaneDeath::Code(255));
+        host.die(&host_ref(&shell), PaneDeath::Code(255));
+        e.supervise_tick().unwrap();
+        let a = e.get(&agent.id).unwrap().unwrap();
+        assert_eq!(a.state, SessionState::NeedsYou);
+        let att = a.attention.unwrap();
+        assert_eq!(att.reason, RESTORABLE);
+        assert!(att.detail.as_deref().unwrap().contains("SSH to box"), "{att:?}");
+        assert!(att.detail.as_deref().unwrap().contains("not resumed"), "{att:?}");
+        assert!(e.rt().relaunch_at.is_empty(), "nothing is scheduled");
+        let sh = e.get(&shell.id).unwrap().unwrap();
+        assert_eq!(sh.state, SessionState::Dead);
+        assert!(sh.attention.unwrap().detail.unwrap().contains("the remote shell ended with it"));
+    }
+
+    /// Any other exit is the remote program's own, handled as usual.
+    #[test]
+    fn a_remote_program_failing_is_not_a_lost_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let agent = remote_new(&e, SessionKind::Claude, "box", None, None).unwrap();
+        host.die(&host_ref(&agent), PaneDeath::Code(1));
+        e.supervise_tick().unwrap();
+        let a = e.get(&agent.id).unwrap().unwrap();
+        assert!(!a.attention.unwrap().detail.unwrap().contains("SSH to"));
+        assert!(e.rt().relaunch_at.contains_key(&agent.id), "rule 2 applies: its conversation resumes");
+        let shell = remote_new(&e, SessionKind::Shell, "box", None, None).unwrap();
+        host.die(&host_ref(&shell), PaneDeath::Code(0));
+        e.supervise_tick().unwrap();
+        assert_eq!(
+            e.get(&shell.id).unwrap().unwrap().state,
+            SessionState::Done,
+            "`exit` in the remote shell is done"
+        );
+    }
+
+    /// A split of a remote pane is another `ssh` to the same place, not a
+    /// shell in the local directory that `ssh` happens to run from.
+    #[test]
+    fn a_split_of_a_remote_pane_stays_on_its_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = remote_new(&e, SessionKind::Shell, "box", Some("/srv"), None).unwrap();
+        let split = e
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                cwd_of: Some(s.id.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(split.remote, s.remote);
+        assert_eq!(host.session(&host_ref(&split)).unwrap().argv[0], "ssh");
+        e.prewarm(None, Some(&s.id)).unwrap();
+        assert!(e.rt().spares.is_empty(), "no local spare for a remote pane");
+    }
+
+    /// Nothing local describes a remote row: no directory, no pane name, no diff.
+    #[test]
+    fn local_facts_are_not_read_for_a_remote_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = remote_new(&e, SessionKind::Shell, "box", None, None).unwrap();
+        let r = host_ref(&s);
+        host.set_cwd(&r, Some(tmp.path()));
+        host.set_facts(
+            &r,
+            crate::autotitle::PaneFacts {
+                command: "ssh".into(),
+                path: Some("/Users/me".into()),
+                ..Default::default()
+            },
+        );
+        e.supervise_tick().unwrap();
+        e.sample_shell_cwds(true);
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.title, "box", "not named after the local ssh process");
+        assert_eq!(e.with_store(|st| st.last_cwd(&s.id)).unwrap(), None);
+        assert!(e
+            .diff(&s.id, diff::DiffBase::Uncommitted, None)
+            .unwrap_err()
+            .to_string()
+            .contains("local sessions"));
+        let out = e.close(&s.id, true, true, false).unwrap();
+        assert_eq!(out.worktree_removed, None, "nothing local to remove");
+        assert!(e.get(&s.id).unwrap().is_none());
+    }
+
+    /// After an interruption a shell reconnects; an agent waits for the user.
+    /// Uses the clean-quit marker because a boot id isn't readable everywhere.
+    #[test]
+    fn an_interruption_reconnects_remote_shells_and_parks_remote_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let agent = remote_new(&e, SessionKind::Claude, "box", None, None).unwrap();
+        let shell = remote_new(&e, SessionKind::Shell, "box", Some("/srv"), None).unwrap();
+        e.with_store(|st| st.set_config(&crate::restore::clean_quit_key(FAKE_SOCKET), "1")).unwrap();
+        host.vanish(&host_ref(&agent));
+        host.vanish(&host_ref(&shell));
+        e.restore_interrupted().unwrap();
+        let a = e.get(&agent.id).unwrap().unwrap();
+        assert_eq!(a.attention.as_ref().unwrap().reason, RESTORABLE, "{a:?}");
+        let sh = e.get(&shell.id).unwrap().unwrap();
+        assert!(sh.attention.unwrap().detail.unwrap().contains("reconnecting to box"));
+    }
+
+    /// Kill & Resume on a live remote shell is a fresh `ssh`, and it ends ready.
+    #[test]
+    fn a_resumed_remote_shell_is_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = remote_new(&e, SessionKind::Shell, "box", Some("/srv"), None).unwrap();
+        let s2 = e.kill(&s.id, true).unwrap();
+        assert_eq!(s2.state, SessionState::Idle);
+        assert_eq!(host.session(&host_ref(&s2)).unwrap().argv[0], "ssh");
+    }
 
     fn new_default_shell(e: &Engine, dir: &Path) -> Session {
         e.new_session(NewRequest {

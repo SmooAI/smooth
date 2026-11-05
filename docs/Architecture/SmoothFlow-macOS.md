@@ -501,6 +501,21 @@ then `origin/main`, `origin/master`, `main`, `master`), so a branch's whole
 change shows, not just what's uncommitted. A chord (⌘⌥2) or the inbox's "Review
 diff" asking for a tab the session can't use lands on the terminal.
 
+## Remote sessions in the app (SMOODEV-4269)
+
+The New Shell in Directory… and New Session sheets have an optional
+SSH host field, with recent hosts and a directory on that machine. Entering a
+host hides the local directory and pearl fields, and the sheet says what happens
+to the session when the connection goes (`RemoteTarget.survivalNote`). A bad host
+disables Start with the reason (`RemoteTarget.problem`, which mirrors the
+engine's check). The fleet row shows the host with the same note as its tooltip.
+Its menu says Reconnect instead of Kill & Resume, and a finished remote row offers
+New Shell on that host. An agent whose connection dropped gets a Resume card in
+the Inbox (`restorable`), and reads `resume?` rather than `approve`. Diff and PR
+are disabled through the existing gate: a remote row has no branch and no head.
+Engine design and the survival table:
+[SmoothFlow.md § Remote sessions](SmoothFlow.md#remote-sessions).
+
 ## Keyboard
 
 Every shortcut is user-configurable — the table below is the shipped default,
