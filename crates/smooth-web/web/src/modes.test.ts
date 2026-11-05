@@ -385,8 +385,8 @@ test('catalogRows: default first, benched best-first, then unbenched', () => {
     assert.equal(rows.filter((r) => r.model === DEFAULT_MODEL).length, 1);
 });
 
-test('the bundled catalog offers only the gpt-6-luna family, Groq, and gpt-6-sol', () => {
-    const allowed = /^(gpt-6-luna(-fast|-high)?|gpt-6-sol|groq-.+)$/;
+test('the bundled catalog offers only the gpt-6-luna family, Claude Haiku 5.5, Groq, and gpt-6-sol', () => {
+    const allowed = /^(gpt-6-luna(-fast|-high)?|claude-haiku-5-5|gpt-6-sol|groq-.+)$/;
     const offending = MODEL_ROWS.map((r) => r.model).filter((m) => !allowed.test(m));
     assert.deepEqual(offending, []);
 });
@@ -400,17 +400,21 @@ test('fetchModelRows appends the catalog unbenched list', async () => {
     assert.equal(rows![rows!.length - 1].model, 'groq-gpt-oss-120b');
 });
 
-test('a model only the live catalog offers is pickable once fetched (Haiku 5.5, SMOODEV-4148)', async () => {
-    assert.equal(modeById('claude-haiku-5-5').model, DEFAULT_MODEL, 'unknown before the live catalog loads');
-    const payload = { suite: 'agentic', trials: 3, scenario_count: 28, models: fixture, unbenched: ['gpt-6-luna', 'claude-haiku-5-5'] };
+test('Haiku 5.5 is in the bundled catalog, so it is pickable before any fetch (SMOODEV-4148)', () => {
+    assert.equal(modeById('claude-haiku-5-5').model, 'claude-haiku-5-5');
+});
+
+test('a model only the live catalog offers is pickable once fetched (SMOODEV-4148)', async () => {
+    assert.equal(modeById('live-only-model').model, DEFAULT_MODEL, 'unknown before the live catalog loads');
+    const payload = { suite: 'agentic', trials: 3, scenario_count: 28, models: fixture, unbenched: ['gpt-6-luna', 'live-only-model'] };
     const rows = await withFetch(
         (async () => new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch,
         () => fetchModelRows(),
     );
-    const haiku = rows!.find((r) => r.model === 'claude-haiku-5-5');
-    assert.ok(haiku, 'offered');
-    assert.equal(haiku!.passRatePct, null, 'not yet benched, never an invented score');
-    assert.equal(modeById('claude-haiku-5-5').model, 'claude-haiku-5-5', 'picking it sends it, not luna');
+    const live = rows!.find((r) => r.model === 'live-only-model');
+    assert.ok(live, 'offered');
+    assert.equal(live!.passRatePct, null, 'not yet benched, never an invented score');
+    assert.equal(modeById('live-only-model').model, 'live-only-model', 'picking it sends it, not luna');
     assert.equal(modeById('gpt-6-luna').model, 'gpt-6-luna');
-    assert.deepEqual(initialModeId('claude-haiku-5-5', false), { id: 'claude-haiku-5-5', markMigrated: false }, 'a saved pick survives reload');
+    assert.deepEqual(initialModeId('live-only-model', false), { id: 'live-only-model', markMigrated: false }, 'a saved pick survives reload');
 });

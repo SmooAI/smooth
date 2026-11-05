@@ -12,55 +12,48 @@ smooth-operator's `LocalServer` (canonical WS protocol + widget) and adds its
 own routes through the engine's `serve_routes` seam. Entry point:
 `serve_local_flavor` in `operator.rs`.
 
-| Module                         | Purpose                                                                                                                                                                                                               |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib.rs`                       | Crate root; `serve_local_flavor` re-export + `start_egress_proxy` (the goalie egress boundary)                                                                                                                        |
-| `operator.rs`                  | The local deployment flavor — builds and runs the operator `LocalServer` in-process, wires tool providers and hooks                                                                                                   |
-| `operator_storage.rs`          | Durable SQLite `StorageAdapter` so conversations/sessions survive restart (no Postgres)                                                                                                                               |
-| `hooks/mod.rs`                 | The two engine `ToolHook`s installed on every per-turn registry: permission gate, then Narc                                                                                                                           |
-| `hooks/narc.rs`                | `NarcHook` — regex detectors on tool args (secrets, prompt injection, dangerous shell), LLM-judge escalation, secret redaction in `post_call`                                                                         |
-| `config.rs`                    | Daemon config + LLM credential resolution (env → providers.json → gateway), egress config                                                                                                                             |
-| `model_router.rs`              | Loopback model router: when providers.json has a key for a direct-route main model (Claude Haiku 5.5 on Anthropic), the `LocalServer` talks to it instead of the gateway, and it sends that model to its own provider |
-| `schedule.rs` / `scheduler.rs` | Proactive/scheduled turns; `SqliteScheduleStore` persists them, the tick loop fires them via a `TurnDriver`                                                                                                           |
-| `search.rs`                    | `GET /search` — the `@`-mention autocomplete backend for the web composer                                                                                                                                             |
-| `cwd_route.rs`                 | `GET`/`POST /api/session/cwd` — the UI's `/cd` and `/pwd`                                                                                                                                                             |
-| `flow_route.rs`                | `/api/flow/*` — the SmoothFlow WS (`/api/flow/ws`), HTTP siblings, the Claude Code hooks long-poll, and the supervision tick (th-7f0af3)                                                                              |
-| `relay.rs`                     | Smoo Relay bridge; routes `channel:"flow"` envelopes to the flow WS and caps phone-bound `flow.output` (16 KiB / ~30 fps); a phone's chat bridge outlives `peer_offline` / a socket drop by a 10-min grace window     |
-| `auth_login.rs`                | Browser OAuth2 + PKCE sign-in to Smoo AI, routed through the daemon (works over a tailnet origin)                                                                                                                     |
-| `push.rs`                      | Web Push — VAPID-signed notifications to the installed PWA                                                                                                                                                            |
-| `tailscale.rs`                 | Best-effort `tailscale serve` exposure of the loopback listener                                                                                                                                                       |
+| Module                         | Purpose                                                                                                                                                                                                           |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib.rs`                       | Crate root; `serve_local_flavor` re-export + `start_egress_proxy` (the goalie egress boundary)                                                                                                                    |
+| `operator.rs`                  | The local deployment flavor — builds and runs the operator `LocalServer` in-process, wires tool providers and hooks                                                                                               |
+| `operator_storage.rs`          | Durable SQLite `StorageAdapter` so conversations/sessions survive restart (no Postgres)                                                                                                                           |
+| `hooks/mod.rs`                 | The two engine `ToolHook`s installed on every per-turn registry: permission gate, then Narc                                                                                                                       |
+| `hooks/narc.rs`                | `NarcHook` — regex detectors on tool args (secrets, prompt injection, dangerous shell), LLM-judge escalation, secret redaction in `post_call`                                                                     |
+| `config.rs`                    | Daemon config + LLM credential resolution (env → providers.json → gateway), egress config                                                                                                                         |
+| `schedule.rs` / `scheduler.rs` | Proactive/scheduled turns; `SqliteScheduleStore` persists them, the tick loop fires them via a `TurnDriver`                                                                                                       |
+| `search.rs`                    | `GET /search` — the `@`-mention autocomplete backend for the web composer                                                                                                                                         |
+| `cwd_route.rs`                 | `GET`/`POST /api/session/cwd` — the UI's `/cd` and `/pwd`                                                                                                                                                         |
+| `flow_route.rs`                | `/api/flow/*` — the SmoothFlow WS (`/api/flow/ws`), HTTP siblings, the Claude Code hooks long-poll, and the supervision tick (th-7f0af3)                                                                          |
+| `relay.rs`                     | Smoo Relay bridge; routes `channel:"flow"` envelopes to the flow WS and caps phone-bound `flow.output` (16 KiB / ~30 fps); a phone's chat bridge outlives `peer_offline` / a socket drop by a 10-min grace window |
+| `auth_login.rs`                | Browser OAuth2 + PKCE sign-in to Smoo AI, routed through the daemon (works over a tailnet origin)                                                                                                                 |
+| `push.rs`                      | Web Push — VAPID-signed notifications to the installed PWA                                                                                                                                                        |
+| `tailscale.rs`                 | Best-effort `tailscale serve` exposure of the loopback listener                                                                                                                                                   |
 
-### Main models and the model router (SMOODEV-4148)
+### Main models (SMOODEV-4148)
 
 Big Smooth and `th code` offer two main models and switch between them per turn:
-**`gpt-6-luna`** (the default, on the `llm.smoo.ai` gateway) and
-**`claude-haiku-5-5`** (Claude Haiku 5.5, which the gateway does not serve).
+**`gpt-6-luna`** (the default) and **`claude-haiku-5-5`** (Claude Haiku 5.5).
+Both run through the `llm.smoo.ai` gateway, so the `LocalServer` applies a
+per-turn `send_message.model` by swapping only the model id, and the gateway's
+metering, fallback policy and cost tracking cover Haiku like every other model.
 
-The `LocalServer` holds one gateway and applies a per-turn `send_message.model` by
-swapping only the model id, so Haiku cannot run on it directly. When
-`providers.json` has a provider for a model in `smooth_policy::direct_models`
-(id `anthropic`, or any provider with `api_format: Anthropic`), the daemon starts
-`model_router` on `127.0.0.1:<ephemeral>` behind a per-process bearer secret and
-points the `LocalServer` at it. Each `chat/completions` request naming a
-direct-route model goes to that provider's OpenAI-compatible endpoint, with the
-fields it rejects removed (Haiku 5.5 400s on any `temperature`). Every other
-request is forwarded to the gateway byte for byte, and responses stream straight
-back. Without such a provider, the router does not start and nothing changes.
+An earlier in-daemon router sent Haiku straight to the user's Anthropic key
+while the gateway did not serve it. The gateway serves it now, so the router is
+gone. A `providers.json` that the old picker wrote with the Coding slot on
+`{anthropic, claude-haiku-5-5}` still works: `upstream_route_at` sends that slot
+to the gateway provider (`FORMER_DIRECT_MODELS` in `smooth-cast`'s
+`providers.rs`). Any other model on an Anthropic slot stays on its own provider.
 
-- **Pickers:** `GET /api/model-catalog` lists Haiku only when it can run, and
-  removes it otherwise. The published catalog never carries direct models, so
-  the daemon takes Haiku's score from `docs/model-leaderboard.json` (matching
-  the bench's `claude-haiku-5-5@anthropic` spelling) and lists it as not benched
-  only when the leaderboard has no row (SMOODEV-4174). The web SPA resolves models that only the
-  live catalog offers. In `th code`'s `/model` picker, Haiku is listed under its
-  own provider.
+- **Pickers:** Haiku is in the offered set in `render-model-scores.sh`, so the
+  published catalog (`GET /api/model-catalog`, the SPA's bundled copy and the
+  phone apps) lists it, under `unbenched` until a bench run scores it. `th code`'s
+  `/model` picker lists it on the gateway provider from the live
+  `/v1/model/info` catalog.
 - **Switching:** picking the Coding (or Default) slot in `th code` switches the
   live session on its next turn and persists to `providers.json`. At startup,
   `th code` runs the persisted Coding model unless `--model` or a daemon-wide
   `th settings set model …` pin is set. The SPA keeps its pick in `localStorage`
   (`smooth.mode`).
-- **To enable Haiku:** add an Anthropic key with `th model login anthropic`, then
-  restart Big Smooth.
 
 ### Dispatch
 

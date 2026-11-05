@@ -50,7 +50,6 @@ pub mod logfile;
 pub mod mode_route;
 pub mod mode_session_route;
 pub mod model_catalog_route;
-pub mod model_router;
 pub mod notify;
 pub mod operator;
 mod operator_storage;

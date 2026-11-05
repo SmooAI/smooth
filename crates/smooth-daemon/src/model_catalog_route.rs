@@ -24,106 +24,13 @@ use axum::Router;
 /// so the served bytes and the checked-in source of truth can never disagree.
 const MODEL_SCORES: &str = include_str!("../../../docs/model-scores.json");
 
-/// The full scoreboard (every model the bench scored, not just the offered set).
-/// Direct-provider models such as Claude Haiku 5.5 are offered per machine, not
-/// in the published catalog, so their scores live only here (SMOODEV-4174).
-const MODEL_LEADERBOARD: &str = include_str!("../../../docs/model-leaderboard.json");
-
 /// Build the `/api/model-catalog` router.
 pub fn model_catalog_router() -> Router {
     Router::new().route("/api/model-catalog", get(catalog_handler))
 }
 
 async fn catalog_handler() -> impl IntoResponse {
-    let providers = tokio::task::spawn_blocking(read_providers).await.ok().flatten();
-    ([(header::CONTENT_TYPE, "application/json")], catalog_json(providers.as_ref()))
-}
-
-/// The user's `providers.json`, if readable (`SMOOTH_PROVIDERS_FILE` override,
-/// else `~/.smooth/providers.json`).
-fn read_providers() -> Option<serde_json::Value> {
-    let path = std::env::var_os("SMOOTH_PROVIDERS_FILE")
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs_next::home_dir().map(|h| h.join(".smooth/providers.json")))?;
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-}
-
-/// The served catalog: the bench scoreboard, adjusted for the direct-route
-/// models (SMOODEV-4148). One the user has a provider for (Claude Haiku 5.5 on
-/// an Anthropic key) is offered — listed under `unbenched` when the bench has
-/// not scored it; one they cannot run is removed, so no picker offers a model
-/// whose every turn would fail. Without direct-route models in play this is the
-/// embedded file byte for byte.
-fn catalog_json(providers: Option<&serde_json::Value>) -> String {
-    catalog_json_from(MODEL_SCORES, MODEL_LEADERBOARD, providers)
-}
-
-/// The leaderboard row for a direct model, matched by id or by the bench's
-/// routed spelling (`claude-haiku-5-5@anthropic`), with its `model` normalised
-/// to the plain id the picker sends.
-fn leaderboard_row(leaderboard: &serde_json::Value, model: &str) -> Option<serde_json::Value> {
-    let matches = |m: &str| m.eq_ignore_ascii_case(model) || m.split_once('@').is_some_and(|(id, _)| id.eq_ignore_ascii_case(model));
-    let row = leaderboard
-        .get("models")?
-        .as_array()?
-        .iter()
-        .find(|r| r.get("model").and_then(serde_json::Value::as_str).is_some_and(matches))?;
-    let mut row = row.clone();
-    row["model"] = serde_json::Value::String(model.to_owned());
-    Some(row)
-}
-
-fn catalog_json_from(board: &str, leaderboard: &str, providers: Option<&serde_json::Value>) -> String {
-    use smooth_policy::direct_models::DIRECT_MODELS;
-    let leaderboard: serde_json::Value = serde_json::from_str(leaderboard).unwrap_or(serde_json::Value::Null);
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(board) else {
-        return board.to_owned();
-    };
-    let available =
-        |d: &smooth_policy::direct_models::DirectModel| providers.is_some_and(|p| smooth_cast::providers::direct_provider_from_value(p, d).is_some());
-    let mut changed = false;
-    for d in DIRECT_MODELS {
-        let is = |m: &serde_json::Value| m.as_str().is_some_and(|m| m.eq_ignore_ascii_case(d.model));
-        let benched = v
-            .get("models")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|ms| ms.iter().any(|m| m.get("model").is_some_and(is)));
-        if available(d) {
-            if benched {
-                continue;
-            }
-            if let Some(row) = leaderboard_row(&leaderboard, d.model) {
-                if let Some(ms) = v.get_mut("models").and_then(serde_json::Value::as_array_mut) {
-                    ms.push(row);
-                    changed = true;
-                    continue;
-                }
-            }
-            let unbenched = v.as_object_mut().map(|o| o.entry("unbenched").or_insert_with(|| serde_json::json!([])));
-            if let Some(list) = unbenched.and_then(serde_json::Value::as_array_mut) {
-                if !list.iter().any(is) {
-                    list.push(serde_json::Value::String(d.model.to_owned()));
-                    changed = true;
-                }
-            }
-        } else {
-            if let Some(ms) = v.get_mut("models").and_then(serde_json::Value::as_array_mut) {
-                let before = ms.len();
-                ms.retain(|m| !m.get("model").is_some_and(is));
-                changed |= ms.len() != before;
-            }
-            if let Some(list) = v.get_mut("unbenched").and_then(serde_json::Value::as_array_mut) {
-                let before = list.len();
-                list.retain(|m| !is(m));
-                changed |= list.len() != before;
-            }
-        }
-    }
-    if changed {
-        v.to_string()
-    } else {
-        board.to_owned()
-    }
+    ([(header::CONTENT_TYPE, "application/json")], MODEL_SCORES)
 }
 
 #[cfg(test)]
@@ -144,96 +51,19 @@ mod tests {
         assert!(first.get("pass_rate_pct").is_some(), "each entry has a `pass_rate_pct`");
     }
 
-    fn with_anthropic() -> serde_json::Value {
-        serde_json::json!({ "providers": [
-            { "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw" },
-            { "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-ant", "api_format": "Anthropic" }
-        ]})
-    }
-
-    fn offered(json: &str) -> Vec<String> {
-        let v: serde_json::Value = serde_json::from_str(json).unwrap();
-        let mut out: Vec<String> = v["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["model"].as_str().unwrap().to_owned())
-            .collect();
-        out.extend(v["unbenched"].as_array().into_iter().flatten().map(|m| m.as_str().unwrap().to_owned()));
-        out
-    }
-
     #[test]
-    fn haiku_is_offered_with_an_anthropic_key() {
-        let models = offered(&catalog_json(Some(&with_anthropic())));
-        assert!(models.iter().any(|m| m == "claude-haiku-5-5"), "{models:?}");
-        assert!(models.iter().any(|m| m == "gpt-6-luna"), "luna stays offered: {models:?}");
-    }
-
-    #[test]
-    fn haiku_is_hidden_without_a_provider_for_it() {
-        let gateway_only = serde_json::json!({ "providers": [{ "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw" }] });
-        for providers in [None, Some(&gateway_only)] {
-            let json = catalog_json(providers);
-            assert!(!offered(&json).iter().any(|m| m == "claude-haiku-5-5"));
-        }
-    }
-
-    #[test]
-    fn a_benched_but_unrunnable_direct_model_is_removed() {
-        let mut v: serde_json::Value = serde_json::from_str(MODEL_SCORES).unwrap();
-        let mut row = v["models"][0].clone();
-        row["model"] = "claude-haiku-5-5".into();
-        v["models"].as_array_mut().unwrap().push(row);
-        let without = strip_with(&v, None);
-        assert!(!without.iter().any(|m| m == "claude-haiku-5-5"));
-        let with = strip_with(&v, Some(&with_anthropic()));
-        assert_eq!(
-            with.iter().filter(|m| *m == "claude-haiku-5-5").count(),
-            1,
-            "benched row kept once, not re-added as unbenched"
-        );
-    }
-
-    /// [`catalog_json`] over an arbitrary scoreboard (the embedded one is fixed
-    /// at compile time).
-    fn strip_with(board: &serde_json::Value, providers: Option<&serde_json::Value>) -> Vec<String> {
-        offered(&catalog_json_from(&board.to_string(), MODEL_LEADERBOARD, providers))
-    }
-
-    fn haiku_board() -> String {
-        serde_json::json!({ "models": [
-            { "model": "claude-haiku-5-5@anthropic", "pass_rate_pct": 82.1, "passed": 23, "conclusive": 28, "inconclusive": 0, "duration_s": 985.0, "safety_violations": 1 }
-        ]})
-        .to_string()
-    }
-
-    #[test]
-    fn a_benched_direct_model_carries_its_leaderboard_score() {
-        let json = catalog_json_from(MODEL_SCORES, &haiku_board(), Some(&with_anthropic()));
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let row = v["models"].as_array().unwrap().iter().find(|m| m["model"] == "claude-haiku-5-5").unwrap(); // the haiku row from the leaderboard, under its plain id
-        assert!((row["pass_rate_pct"].as_f64().unwrap() - 82.1).abs() < 1e-9);
-        assert!(!offered(&json).iter().any(|m| m == "claude-haiku-5-5@anthropic"), "routed spelling never leaks");
-        assert_eq!(offered(&json).iter().filter(|m| *m == "claude-haiku-5-5").count(), 1, "not also unbenched");
-    }
-
-    #[test]
-    fn a_leaderboard_score_is_not_offered_without_the_provider() {
-        let json = catalog_json_from(MODEL_SCORES, &haiku_board(), None);
-        assert!(!offered(&json).iter().any(|m| m.starts_with("claude-haiku-5-5")));
-    }
-
-    #[test]
-    fn a_malformed_leaderboard_falls_back_to_unbenched() {
-        let json = catalog_json_from(MODEL_SCORES, "not json", Some(&with_anthropic()));
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v["unbenched"].as_array().unwrap().iter().any(|m| m == "claude-haiku-5-5"));
+    fn haiku_is_offered_from_the_gateway() {
+        // Claude Haiku 5.5 runs through the gateway like every other model
+        // (SMOODEV-4148), so it is in the published catalog for every client.
+        let v: serde_json::Value = serde_json::from_str(MODEL_SCORES).unwrap();
+        let benched = v["models"].as_array().unwrap().iter().filter_map(|m| m["model"].as_str());
+        let unbenched = v["unbenched"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str);
+        assert!(benched.chain(unbenched).any(|m| m == "claude-haiku-5-5"));
     }
 
     #[test]
     fn the_catalog_date_passes_through() {
-        let v: serde_json::Value = serde_json::from_str(&catalog_json(Some(&with_anthropic()))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(MODEL_SCORES).unwrap();
         assert!(v["date"].as_str().is_some_and(|d| d.len() == 10), "dated catalog: {:?}", v.get("date"));
     }
 

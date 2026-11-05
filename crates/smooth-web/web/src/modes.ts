@@ -338,8 +338,8 @@ export const DEFAULT_MODE_ID = DEFAULT_MODEL;
 
 const MODE_BY_ID = new Map(MODES.map((m) => [m.id, m]));
 
-/** Models only the daemon's live catalog offers (SMOODEV-4148: Claude Haiku 5.5
- * when the user has an Anthropic key). Without these, picking one fell back to
+/** Models the live catalog offers but the bundled one predates (SMOODEV-4148:
+ * Claude Haiku 5.5 on older bundles). Without these, picking one fell back to
  * luna in `modeById` and the turn silently ran on the wrong model. */
 const LIVE_MODE_BY_ID = new Map<string, SmoothMode>();
 

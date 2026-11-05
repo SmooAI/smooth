@@ -210,13 +210,6 @@ pub struct ModelPickerState {
     /// provider is configured or the endpoint is unreachable, in which
     /// case the offline catalog is used. Pearl th-7ee88e (SMOODEV-1793).
     pub gateway_models: Vec<ModelEntry>,
-    /// Main models the daemon routes straight to the user's own provider.
-    ///
-    /// Claude Haiku 5.5 on an Anthropic key, which the gateway does not serve;
-    /// re-read from `providers.json` with the slots. Empty when no such
-    /// provider is configured, so the picker never offers a model that would
-    /// fail. SMOODEV-4148.
-    pub direct_models: Vec<ModelEntry>,
 }
 
 impl Default for ModelPickerState {
@@ -238,7 +231,6 @@ impl ModelPickerState {
             show_all: false,
             local_models: Vec::new(),
             gateway_models: Vec::new(),
-            direct_models: Vec::new(),
         }
     }
 
@@ -278,14 +270,6 @@ impl ModelPickerState {
         self.selected = (self.selected + 1) % n;
     }
 
-    /// Models offered beside the gateway catalog: the direct-route main
-    /// models first, then live local-provider models.
-    fn extra_models(&self) -> Vec<ModelEntry> {
-        let mut out = self.direct_models.clone();
-        out.extend(self.local_models.iter().cloned());
-        out
-    }
-
     fn current_len(&self) -> usize {
         match self.view {
             PickerView::Slots => self.slots.len(),
@@ -303,7 +287,7 @@ impl ModelPickerState {
         let Some(entry) = self.slots.get(self.selected).cloned() else { return };
         // Reset the filter override every time the user drills in fresh.
         self.show_all = false;
-        self.models = candidate_models_filtered(&self.slots, &entry, &self.extra_models(), &self.gateway_models, self.show_all);
+        self.models = candidate_models_filtered(&self.slots, &entry, &self.local_models, &self.gateway_models, self.show_all);
         // Pre-select the slot's current model when it's in the list.
         self.selected = self
             .models
@@ -335,7 +319,7 @@ impl ModelPickerState {
         self.show_all = !self.show_all;
         let focused = self.slots.iter().find(|s| s.slot == slot).cloned();
         if let Some(focused) = focused {
-            self.models = candidate_models_filtered(&self.slots, &focused, &self.extra_models(), &self.gateway_models, self.show_all);
+            self.models = candidate_models_filtered(&self.slots, &focused, &self.local_models, &self.gateway_models, self.show_all);
             self.selected = prev
                 .as_ref()
                 .and_then(|p| self.models.iter().position(|m| m.provider == p.provider && m.model == p.model))
@@ -422,7 +406,6 @@ impl ModelPickerState {
                 self.error = Some(format!("load failed: {e}"));
             }
         }
-        self.direct_models = smooth_cast::providers::load_value(path).map(|v| direct_model_entries(&v)).unwrap_or_default();
     }
 
     /// Load slots from an explicit registry (used by tests and by
@@ -430,25 +413,6 @@ impl ModelPickerState {
     pub fn load_from_registry(&mut self, registry: &ProviderRegistry) {
         self.slots = slot_entries(registry);
     }
-}
-
-/// The direct-route main models the user can run.
-///
-/// Each is on the provider id `providers.json` gives it
-/// ([`smooth_policy::direct_models`]). Pure so the
-/// offered/hidden rule is testable without a file.
-pub fn direct_model_entries(providers: &serde_json::Value) -> Vec<ModelEntry> {
-    smooth_policy::direct_models::DIRECT_MODELS
-        .iter()
-        .filter_map(|d| {
-            let provider = smooth_cast::providers::direct_provider(providers, d)?.get("id")?.as_str()?.to_owned();
-            Some(ModelEntry {
-                provider,
-                model: d.model.to_owned(),
-                info: catalog_lookup(d.model).cloned(),
-            })
-        })
-        .collect()
 }
 
 /// The persisted main (Coding) model th code should put on every turn at startup.
@@ -766,20 +730,8 @@ fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, local: &[
         // Offline catalog. Pick the provider from the focused slot so a
         // freshly-installed gateway user gets `smooai-gateway`-routed
         // entries and a direct user keeps their own provider id.
-        //
-        // A slot on a direct-route model (Haiku on `anthropic`) is not on the
-        // gateway, so borrow the provider of a slot that is (SMOODEV-4148).
-        let on_gateway = |s: &&SlotEntry| smooth_policy::direct_models::direct_model(&s.current_model).is_none();
-        let provider = std::iter::once(focused)
-            .chain(slots)
-            .find(on_gateway)
-            .map_or_else(|| focused.current_provider.clone(), |s| s.current_provider.clone());
+        let provider = focused.current_provider.clone();
         for (model_name, info) in fallback_catalog() {
-            // A direct-route model runs on its own provider, never the slot's
-            // gateway; it is offered via `local` only when that provider exists.
-            if smooth_policy::direct_models::direct_model(model_name).is_some() {
-                continue;
-            }
             push(
                 ModelEntry {
                     provider: provider.clone(),
@@ -903,15 +855,15 @@ pub fn fallback_catalog() -> &'static [(&'static str, ModelInfo)] {
                     benchmarks: Benchmarks::default(),
                 },
             ),
-            // SMOODEV-4148: the second main model. Not on the gateway — the
-            // daemon routes it to the user's Anthropic key. $0.10/$0.50 per M
-            // tokens (prompts up to 100K; $0.50/$2.50 above).
+            // SMOODEV-4148: the second main model, served by the gateway like
+            // the rest. $0.10/$0.50 per M tokens (prompts up to 100K;
+            // $0.50/$2.50 above).
             (
                 "claude-haiku-5-5",
                 ModelInfo {
                     use_cases: svec(&["coding", "reviewing", "summarize", "agentic", "fast"]),
                     tier: Tier::Workhorse,
-                    description: "Claude Haiku 5.5 — fast Anthropic main model, on your Anthropic key.".into(),
+                    description: "Claude Haiku 5.5 — fast Anthropic main model, via the gateway.".into(),
                     input_cost_per_token: 0.0000001,
                     output_cost_per_token: 0.0000005,
                     benchmarks: Benchmarks::default(),
@@ -1487,22 +1439,14 @@ mod tests {
         assert_eq!(reloaded.routing.coding.model, "deepseek-v4-pro");
     }
 
-    /// A `providers.json` with the gateway and (optionally) an Anthropic key,
-    /// the Coding slot on gpt-6-luna. SMOODEV-4148.
-    fn write_main_model_providers(dir: &Path, with_anthropic: bool) -> PathBuf {
-        let mut providers = vec![serde_json::json!({
-            "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw",
-            "api_format": "OpenAiCompat", "default_model": "gpt-6-luna"
-        })];
-        if with_anthropic {
-            providers.push(serde_json::json!({
-                "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-ant",
-                "api_format": "Anthropic", "default_model": "claude-sonnet-4-5"
-            }));
-        }
+    /// A gateway-only `providers.json`, the Coding slot on gpt-6-luna. SMOODEV-4148.
+    fn write_main_model_providers(dir: &Path) -> PathBuf {
         let slot = serde_json::json!({ "provider": "smooth", "model": "gpt-6-luna" });
         let v = serde_json::json!({
-            "providers": providers,
+            "providers": [{
+                "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw",
+                "api_format": "OpenAiCompat", "default_model": "gpt-6-luna"
+            }],
             "routing": { "coding": slot, "reasoning": slot, "reviewing": slot, "judge": slot, "summarize": slot, "default": slot, "fast": slot }
         });
         let path = dir.join("providers.json");
@@ -1518,7 +1462,7 @@ mod tests {
     #[test]
     fn haiku_and_luna_are_both_main_model_choices_and_switch_both_ways() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let path = write_main_model_providers(tmp.path(), true);
+        let path = write_main_model_providers(tmp.path());
         let mut p = ModelPickerState::new();
         p.providers_path = Some(path.clone());
         p.reload_slots();
@@ -1529,19 +1473,15 @@ mod tests {
             .iter()
             .position(|m| m.model == "claude-haiku-5-5")
             .expect("haiku 5.5 is offered for Coding");
-        assert_eq!(p.models[haiku].provider, "anthropic", "haiku runs on the Anthropic key, not the gateway");
+        assert_eq!(p.models[haiku].provider, "smooth", "haiku runs through the gateway");
         assert!(p.models.iter().any(|m| m.model == "gpt-6-luna" && m.provider == "smooth"), "luna stays offered");
-        assert!(
-            !p.models.iter().any(|m| m.model == "claude-haiku-5-5" && m.provider == "smooth"),
-            "never offered on the gateway"
-        );
 
         p.selected = haiku;
         assert_eq!(p.apply_selected_main_model().as_deref(), Some("claude-haiku-5-5"), "the live session switches");
         let reg = ProviderRegistry::load_from_file(&path).expect("reload");
         assert_eq!(
             (reg.routing.coding.provider.as_str(), reg.routing.coding.model.as_str()),
-            ("anthropic", "claude-haiku-5-5"),
+            ("smooth", "claude-haiku-5-5"),
             "and it persists"
         );
 
@@ -1556,42 +1496,32 @@ mod tests {
     }
 
     #[test]
-    fn haiku_is_offered_beside_a_live_gateway_catalog() {
+    fn haiku_follows_the_live_gateway_catalog() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let mut p = ModelPickerState::new();
-        p.providers_path = Some(write_main_model_providers(tmp.path(), true));
+        p.providers_path = Some(write_main_model_providers(tmp.path()));
         p.reload_slots();
-        p.gateway_models = vec![ModelEntry {
+        let entry = |model: &str| ModelEntry {
             provider: "smooth".into(),
-            model: "gpt-6-luna".into(),
-            info: catalog_lookup("gpt-6-luna").cloned(),
-        }];
+            model: model.into(),
+            info: catalog_lookup(model).cloned(),
+        };
+        p.gateway_models = vec![entry("gpt-6-luna"), entry("claude-haiku-5-5")];
         open_coding(&mut p);
-        assert!(p.models.iter().any(|m| m.model == "claude-haiku-5-5" && m.provider == "anthropic"));
-    }
+        assert!(p.models.iter().any(|m| m.model == "claude-haiku-5-5" && m.provider == "smooth"));
 
-    #[test]
-    fn haiku_is_hidden_without_an_anthropic_key() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let mut p = ModelPickerState::new();
-        p.providers_path = Some(write_main_model_providers(tmp.path(), false));
-        p.reload_slots();
-        assert!(p.direct_models.is_empty());
+        // The live catalog is authoritative: a gateway without Haiku never offers it.
+        p.gateway_models = vec![entry("gpt-6-luna")];
+        p.view = PickerView::Slots;
         open_coding(&mut p);
-        assert!(
-            !p.models.iter().any(|m| m.model == "claude-haiku-5-5"),
-            "a model with no provider is never offered"
-        );
-        p.show_all = false;
-        p.toggle_show_all();
-        assert!(!p.models.iter().any(|m| m.model == "claude-haiku-5-5"), "not even under Tab (show all)");
+        assert!(!p.models.iter().any(|m| m.model == "claude-haiku-5-5"));
     }
 
     #[test]
     fn a_non_main_slot_pick_does_not_switch_the_session() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let mut p = ModelPickerState::new();
-        p.providers_path = Some(write_main_model_providers(tmp.path(), true));
+        p.providers_path = Some(write_main_model_providers(tmp.path()));
         p.reload_slots();
         p.selected = ALL_SLOTS.iter().position(|(s, _, _)| *s == PickerSlot::Fast).expect("fast slot");
         p.open_models_for_selected();
@@ -1852,13 +1782,7 @@ mod tests {
         // Default = no filter. Should match the catalog size minus any
         // dedup'd slot entry (the only slot entry already lives in the
         // catalog so the total equals catalog size).
-        // Direct-route models (Haiku 5.5) are offered only on their own
-        // provider, never on the slot's gateway (SMOODEV-4148).
-        let catalog_n = fallback_catalog()
-            .iter()
-            .filter(|(m, _)| smooth_policy::direct_models::direct_model(m).is_none())
-            .count();
-        assert_eq!(models.len(), catalog_n, "default slot should show every gateway catalog model");
+        assert_eq!(models.len(), fallback_catalog().len(), "default slot should show every catalog model");
     }
 
     #[test]

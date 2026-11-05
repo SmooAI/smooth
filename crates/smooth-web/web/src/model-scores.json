@@ -21,6 +21,7 @@
     }
   ],
   "unbenched": [
+    "claude-haiku-5-5",
     "gpt-6-luna",
     "gpt-6-luna-fast",
     "gpt-6-luna-high",
