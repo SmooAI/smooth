@@ -83,8 +83,9 @@ async fn daemon_teardown_leaves_no_tmux_server_or_process(host: Host) {
         let d = Daemon::boot(host).await;
         let s = d.new_session("fake-agent", Some("/work bye")).await;
         let id = s["id"].as_str().unwrap().to_string();
-        d.wait_until(&id, "idle", WAIT, |s| state(s) == "idle").await;
-        (d.socket.clone(), s["pid"].as_u64().unwrap() as u32, d.host_pid(&id))
+        // A new session answers before it launches, so the pid comes from the row once it has one.
+        let idle = d.wait_until(&id, "idle", WAIT, |s| state(s) == "idle").await;
+        (d.socket.clone(), idle["pid"].as_u64().unwrap() as u32, d.host_pid(&id))
     };
     match host {
         Host::Tmux => {

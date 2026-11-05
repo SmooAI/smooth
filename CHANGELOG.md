@@ -1,5 +1,26 @@
 # @smooai/smooth
 
+## 0.92.0
+
+### Minor Changes
+
+- 61747ef: SMOODEV-4238: New SmoothFlow sessions run on the `pty` session host by default (`SMOOTH_FLOW_HOST=tmux` still selects tmux; existing tmux sessions finish on tmux). Quitting SmoothFlow no longer ends `pty` sessions: the next launch re-adopts them. The app saves its tabs and splits and restores them on launch. After a reboot, shells reopen in the directory they were last in. Pre-warmed shells (⌘N) and live shell tab names now work on the `pty` host too. The engine drops terminal-query answers a client sends to a `pty` session, which stops stray characters appearing in shells, and the Mac app no longer sends them. See ADR-014.
+
+### Patch Changes
+
+- 61747ef: SmoothFlow tells an interrupted session from a crashed one (SMOODEV-4113). After a clean daemon shutdown (quitting the app) or a reboot, agents whose conversation can be resumed come back with their harness's resume, 300 ms apart, without spending the crash-retry budget, on tmux and the pty host alike. An agent with no harness session id is never relaunched with its prompt, after an interruption or a crash: it is left `needs_you` with attention `restorable` until the user resumes it. A `/clear` in a SmoothFlow-launched agent rebinds the row to the new harness session id.
+
+## 0.91.0
+
+### Minor Changes
+
+- 8eb4b64: SMOODEV-4127: ⌘N in SmoothFlow now shows a prompt in about 50–90 ms instead of about 0.7 s.
+
+  - **Pre-warmed shells.** The engine keeps a spare shell already at a prompt (up to three, one per directory, in hidden `flowspare-*` tmux sessions), and a new shell in that directory claims it. The app hints where the next ⌘N will open with the new `flow.prewarm` frame. `SMOOTH_FLOW_PREWARM=0` turns this off.
+  - **Faster shell creation.** Creating a shell no longer runs pearl inference on the request path. That work now happens in the background.
+  - **Live tab names.** Shell tabs are named like cmux names them: by the running program (its OSC title, else its command name), else by the folder.
+  - **Rename Tab (⌘⇧R).** Rename Tab opens an inline popover: Esc cancels, and an empty name goes back to the automatic one. You can rebind it in `keybindings.toml`. The name is pinned on the session row (`flow.rename`, `POST /api/flow/sessions/{id}/rename`, `th flow rename`, additive `title_pinned`), so the phones and `th flow ls` show it as well.
+
 ## 0.90.0
 
 ### Minor Changes
