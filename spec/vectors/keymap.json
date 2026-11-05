@@ -414,6 +414,26 @@
             "action": "settings",
             "wire": "cmd+,",
             "display": "⌘,"
+          },
+          {
+            "action": "commandPalette",
+            "wire": "shift+cmd+p",
+            "display": "⇧⌘P"
+          },
+          {
+            "action": "find",
+            "wire": "cmd+f",
+            "display": "⌘F"
+          },
+          {
+            "action": "findNext",
+            "wire": "cmd+g",
+            "display": "⌘G"
+          },
+          {
+            "action": "findPrevious",
+            "wire": "shift+cmd+g",
+            "display": "⇧⌘G"
           }
         ],
         "conflicts": 0
@@ -641,6 +661,26 @@
             "action": "settings",
             "wire": "ctrl+,",
             "display": "Ctrl+,"
+          },
+          {
+            "action": "commandPalette",
+            "wire": "ctrl+shift+p",
+            "display": "Ctrl+Shift+P"
+          },
+          {
+            "action": "find",
+            "wire": "ctrl+shift+f",
+            "display": "Ctrl+Shift+F"
+          },
+          {
+            "action": "findNext",
+            "wire": "ctrl+shift+g",
+            "display": "Ctrl+Shift+G"
+          },
+          {
+            "action": "findPrevious",
+            "wire": "ctrl+opt+shift+g",
+            "display": "Ctrl+Shift+Alt+G"
           }
         ],
         "conflicts": 0

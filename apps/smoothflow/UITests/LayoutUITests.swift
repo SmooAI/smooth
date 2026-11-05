@@ -44,6 +44,38 @@ final class LayoutUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { self.paneCount == 4 }, "⌘⇧↑ splits")
     }
 
+    private func element(_ id: String) -> XCUIElement { app.descendants(matching: .any)[id] }
+
+    /// SMOODEV-4266: ⌘F reaches the find bar through the menu, typing searches
+    /// the pane (the mock's banner says "mock"), and Esc closes it.
+    func testCommandFFindsInTheTerminal() {
+        selectWorkingSession()
+        app.typeKey("f", modifierFlags: .command)
+        XCTAssertTrue(element("find.field").waitForExistence(timeout: 10), "⌘F opens the bar; tree: \(dump())")
+        app.typeText("mock")
+        XCTAssertTrue(waitUntil { self.label("find.count").contains("found") || self.label("find.count").contains(" of ") }, "count: \(label("find.count"))")
+        app.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil { !self.element("find.field").exists }, "Esc closes the bar")
+    }
+
+    /// SMOODEV-4266: ⌘⇧P lists the keymap's actions; Return runs the match
+    /// through the same path as its menu item.
+    func testCommandPaletteRunsAnAction() {
+        selectWorkingSession()
+        XCTAssertEqual(paneCount, 1)
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(element("palette.field").waitForExistence(timeout: 10), "⌘⇧P opens the palette; tree: \(dump())")
+        app.typeText("split right\r")
+        XCTAssertTrue(waitUntil { !self.element("palette.field").exists }, "a choice closes it")
+        XCTAssertTrue(waitUntil { self.paneCount == 2 }, "the action ran")
+
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(element("palette.field").waitForExistence(timeout: 10))
+        app.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil { !self.element("palette.field").exists }, "Esc closes it")
+        XCTAssertEqual(paneCount, 2, "and runs nothing")
+    }
+
     /// ⌘N opens a shell in a new tab at once — no sheet.
     func testCommandNOpensAShellTabWithNoSheet() {
         selectWorkingSession()

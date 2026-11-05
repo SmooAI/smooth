@@ -244,6 +244,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             self.client.send(.resize(id: id, cols: cols, rows: rows))
         }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
+        v.fallbackDirectory = { [weak self] in self?.store.sessions[id]?.worktree }
         v.onPwd = { [weak self] _ in
             self?.mainWindow?.center.refreshHeaders()
             if self?.store.focusedId == id { self?.prewarmNextShell() }

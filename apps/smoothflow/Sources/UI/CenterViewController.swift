@@ -553,6 +553,21 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         replaceActiveTab(t, redividing: true)
     }
 
+    /// ⌘F. Find belongs to the terminal: elsewhere, and on an empty pane,
+    /// there is no surface to search.
+    func showFind() {
+        focusedSurface?.startFind()
+    }
+
+    func navigateFind(forward: Bool) {
+        focusedSurface?.navigateFind(forward: forward)
+    }
+
+    private var focusedSurface: TerminalSurfaceView? {
+        guard tab == .terminal, let t = activeTab, let sid = t.sessions[t.focused] else { return nil }
+        return app.surfaceIfLoaded(sid)
+    }
+
     private func focusActiveSurface() {
         guard let t = activeTab, let sid = t.sessions[t.focused], let surface = app.surfaceIfLoaded(sid) else { return }
         view.window?.makeFirstResponder(surface)
