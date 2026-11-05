@@ -1,4 +1,5 @@
 import AppKit
+import os
 import SwiftUI
 
 enum CenterTab: Int { case terminal, diff, pr, activity }
@@ -15,7 +16,13 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     private let pathLabel = NSTextField(labelWithString: "")
     /// Surface tabs (⌘T) over a pane tree (⌘D and friends). Never empty.
     private let tabBar = SurfaceTabBar()
-    private let treeView = PaneTreeView()
+    /// One pane tree per surface tab, stacked in `treeArea` with only the
+    /// active one shown: switching tabs is a hide and a show, not a rebuild
+    /// of split views and a re-parent of every surface (SMOODEV-4127).
+    private var trees: [Int: PaneTreeView] = [:]
+    private let treeArea = NSView()
+    /// The active tab's tree.
+    private var treeView: PaneTreeView { tree(for: activeTab?.id ?? 0) }
     private let surfaceArea = NSStackView()
     private var surfaceTabs: [SurfaceTab] = [] { didSet { layoutChanged() } }
     private var activeTabIndex = 0 { didSet { layoutChanged() } }
@@ -162,21 +169,15 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         surfaceArea.spacing = 0
         surfaceArea.alignment = .leading
         surfaceArea.addArrangedSubview(tabBar)
-        surfaceArea.addArrangedSubview(treeView)
-        treeView.translatesAutoresizingMaskIntoConstraints = false
+        surfaceArea.addArrangedSubview(treeArea)
+        treeArea.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             tabBar.widthAnchor.constraint(equalTo: surfaceArea.widthAnchor),
-            treeView.widthAnchor.constraint(equalTo: surfaceArea.widthAnchor),
+            treeArea.widthAnchor.constraint(equalTo: surfaceArea.widthAnchor),
         ])
-        tabBar.onSelect = { [weak self] i in self?.selectTab(i) }
-        tabBar.onClose = { [weak self] i in self?.closeTab(at: i) }
-        tabBar.onNew = { [weak self] in self?.newTab() }
-        treeView.onPaneActivated = { [weak self] id in self?.paneActivated(id) }
-        treeView.onFractionChanged = { [weak self] f, a, b in
-            guard let self, var t = self.activeTab else { return }
-            t.root = t.root.settingFraction(f, between: a, and: b)
-            self.replaceActiveTab(t, relayout: false)
-        }
+        tabBar.onSelect = { [weak self] i in TabLatency.measure("click tab") { self?.selectTab(i) } }
+        tabBar.onClose = { [weak self] i in TabLatency.measure("click close") { self?.closeTab(at: i) } }
+        tabBar.onNew = { [weak self] in TabLatency.measure("click new") { self?.newTab() } }
         if let saved = LayoutPersistence.load(), let restored = saved.restore(firstTabId: nextTabId) {
             // SMOODEV-4238: every tab and split comes back where it was; the
             // panes fill as the engine's hello names their sessions.
@@ -223,6 +224,41 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         renderTabs()
     }
 
+    /// Tab `id`'s tree, made (hidden) the first time it is asked for.
+    private func tree(for id: Int) -> PaneTreeView {
+        if let v = trees[id] { return v }
+        let v = PaneTreeView()
+        v.isHidden = true
+        v.onPaneActivated = { [weak self] pane in self?.paneActivated(pane) }
+        v.onFractionChanged = { [weak self] f, a, b in
+            guard let self, let i = self.surfaceTabs.firstIndex(where: { $0.id == id }) else { return }
+            self.surfaceTabs[i].root = self.surfaceTabs[i].root.settingFraction(f, between: a, and: b)
+        }
+        v.translatesAutoresizingMaskIntoConstraints = false
+        treeArea.addSubview(v)
+        // Start at the area's size: the first `apply` builds its split views
+        // and pushes the model's fractions, which needs a size to divide.
+        v.frame = treeArea.bounds
+        NSLayoutConstraint.activate([
+            v.leadingAnchor.constraint(equalTo: treeArea.leadingAnchor), v.trailingAnchor.constraint(equalTo: treeArea.trailingAnchor),
+            v.topAnchor.constraint(equalTo: treeArea.topAnchor), v.bottomAnchor.constraint(equalTo: treeArea.bottomAnchor),
+        ])
+        trees[id] = v
+        return v
+    }
+
+    /// Show the active tab's tree, hide the rest, drop closed tabs' trees.
+    private func showActiveTree() {
+        let live = Set(surfaceTabs.map(\.id))
+        for (id, v) in trees where !live.contains(id) {
+            v.removeFromSuperview()
+            trees.removeValue(forKey: id)
+        }
+        let active = treeView
+        for v in trees.values where v !== active && !v.isHidden { v.isHidden = true }
+        if active.isHidden { active.isHidden = false }
+    }
+
     private var activeTab: SurfaceTab? {
         surfaceTabs.indices.contains(activeTabIndex) ? surfaceTabs[activeTabIndex] : nil
     }
@@ -237,7 +273,10 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     /// strip. The one place the model reaches the screen.
     private func renderTabs(redividing: Bool = false) {
         guard let t = activeTab else { return }
+        var stage = TabLatency.Stages()
+        showActiveTree()
         treeView.apply(root: t.root, focused: t.focused, zoomed: t.zoomed, redividing: redividing)
+        stage.mark("tree")
         for id in t.panes {
             let pane = treeView.pane(id)
             if let sid = t.sessions[id], app.store.sessions[sid] != nil {
@@ -246,9 +285,14 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
                 pane.showEmpty(launching: launching.contains(id))
             }
         }
+        stage.mark("host")
         tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle(home: self.app.store.home) } }, active: activeTabIndex)
+        stage.mark("strip")
         refreshHeaders()
+        stage.mark("headers")
         if let sid = t.sessions[t.focused], app.store.focusedId != sid { app.store.focusedId = sid }
+        stage.mark("focus")
+        TabLatency.log.debug("renderTabs \(stage.summary, privacy: .public)")
     }
 
     /// A pane took focus (click, or the surface became first responder): it is
@@ -272,6 +316,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         surfaceTabs.append(t)
         activeTabIndex = surfaceTabs.count - 1
         renderTabs()
+        focusShownTab()
     }
 
     /// The session in the focused pane of the active tab, if it still exists —
@@ -354,12 +399,20 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         surfaceTabs.remove(at: i)
         activeTabIndex = min(activeTabIndex >= i ? max(activeTabIndex - 1, 0) : activeTabIndex, surfaceTabs.count - 1)
         renderTabs()
+        focusShownTab()
     }
 
     func selectTab(_ i: Int) {
         guard surfaceTabs.indices.contains(i), i != activeTabIndex else { return }
         activeTabIndex = i
         renderTabs()
+        focusShownTab()
+    }
+
+    /// The keyboard follows the tab on screen: the tab just hidden may hold
+    /// the first responder, and typing would go nowhere.
+    private func focusShownTab() {
+        if tab == .terminal { focusActiveSurface() }
     }
 
     func cycleTab(by delta: Int) {
@@ -507,6 +560,21 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         replaceActiveTab(t, redividing: true)
     }
 
+    /// ⌘F. Find belongs to the terminal: elsewhere, and on an empty pane,
+    /// there is no surface to search.
+    func showFind() {
+        focusedSurface?.startFind()
+    }
+
+    func navigateFind(forward: Bool) {
+        focusedSurface?.navigateFind(forward: forward)
+    }
+
+    private var focusedSurface: TerminalSurfaceView? {
+        guard tab == .terminal, let t = activeTab, let sid = t.sessions[t.focused] else { return nil }
+        return app.surfaceIfLoaded(sid)
+    }
+
     private func focusActiveSurface() {
         guard let t = activeTab, let sid = t.sessions[t.focused], let surface = app.surfaceIfLoaded(sid) else { return }
         view.window?.makeFirstResponder(surface)
@@ -605,11 +673,11 @@ final class SessionPane: NSView {
     required init?(coder: NSCoder) { nil }
 
     func host(_ view: TerminalSurfaceView, id: String) {
-        // Re-hosting what is already here would chain another `onFocus`
-        // wrapper onto the surface every time the tab is laid out.
-        guard sessionId != id || hosted !== view else { return }
+        // A session shown in two tabs has one surface: the other tab's pane
+        // may have taken it since, so "already here" means its superview.
+        guard sessionId != id || hosted !== view || view.superview !== self else { return }
         sessionId = id
-        hosted?.removeFromSuperview()
+        if let old = hosted, old !== view, old.superview === self { old.removeFromSuperview() }
         hosted = view
         view.translatesAutoresizingMaskIntoConstraints = false
         addSubview(view)
@@ -617,11 +685,7 @@ final class SessionPane: NSView {
             view.leadingAnchor.constraint(equalTo: leadingAnchor), view.trailingAnchor.constraint(equalTo: trailingAnchor),
             view.topAnchor.constraint(equalTo: topAnchor, constant: 24), view.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-        let previous = view.onFocus
-        view.onFocus = { [weak self] focused in
-            previous?(focused)
-            if focused { self?.onActivate?() }
-        }
+        view.onHostFocus = { [weak self] in self?.onActivate?() }
     }
 
     func setHeader(_ s: Session, kindLabel: String) {
@@ -636,7 +700,7 @@ final class SessionPane: NSView {
         dot.layer?.backgroundColor = Theme.faint.cgColor
         guard sessionId != nil || hosted != nil else { return }
         sessionId = nil
-        hosted?.removeFromSuperview()
+        if hosted?.superview === self { hosted?.removeFromSuperview() }
         hosted = nil
     }
 

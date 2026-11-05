@@ -34,6 +34,7 @@ pub mod scrape;
 #[cfg(feature = "pty-host")]
 pub mod session_host;
 pub mod store;
+pub mod timing;
 pub mod tmux;
 pub mod vocab;
 

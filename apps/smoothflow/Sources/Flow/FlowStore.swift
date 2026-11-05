@@ -104,6 +104,20 @@ final class FlowStore: ObservableObject {
         return (f, (fanOutCandidates[fid] ?? []).compactMap { sessions[$0] })
     }
 
+    /// Does this row update mean a new process, so a surface must attach again?
+    ///
+    /// A pid appearing for the first time on a live row does not: an agent's row
+    /// exists before its process (SMOODEV-4267), and the engine already holds
+    /// the attach it was sent during the launch. A second one would count the
+    /// surface twice and repaint it. A row coming back from done or dead does,
+    /// whatever its pids: nothing attaches to a finished row, and the engine
+    /// reports the new pid before it reports the row live.
+    private static func relaunched(from old: Session, to new: Session) -> Bool {
+        guard let pid = new.pid, new.isLive else { return false }
+        if !old.isLive { return true }
+        return old.pid != nil && old.pid != pid
+    }
+
     @discardableResult
     func apply(_ frame: FlowFrame) -> [StoreEffect] {
         switch frame {
@@ -123,7 +137,7 @@ final class FlowStore: ObservableObject {
             let before = sessions[s.id]
             upsert(s)
             var effects: [StoreEffect] = []
-            if let b = before, let pid = s.pid, b.pid != pid, s.state != .done, s.state != .dead { effects.append(.relaunched(id: s.id)) }
+            if let b = before, Self.relaunched(from: b, to: s) { effects.append(.relaunched(id: s.id)) }
             if s.needsYou, before?.needsYou != true || before?.attention != s.attention { effects.append(.attention(s)) }
             if (s.state == .done || s.state == .dead), before?.state != s.state { effects.append(.finished(s)) }
             return effects

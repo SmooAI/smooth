@@ -68,9 +68,21 @@ struct FleetSidebar: View {
             StateDot(session: s)
             VStack(alignment: .leading, spacing: 1) {
                 Text(s.label).lineLimit(1).accessibilityIdentifier("sidebar.title.\(s.id)")
-                Text(Theme.stateLabel(s) + (s.state == .done && app.handoffs[s.id]?.pr?.number != nil ? " · PR #\(app.handoffs[s.id]!.pr!.number!)" : ""))
-                    .font(.caption).foregroundStyle(s.needsYou ? Color(Theme.amber) : Color(Theme.muted))
-                    .accessibilityIdentifier("sidebar.state.\(s.id)")
+                HStack(spacing: 6) {
+                    Text(Theme.stateLabel(s) + (s.state == .done && app.handoffs[s.id]?.pr?.number != nil ? " · PR #\(app.handoffs[s.id]!.pr!.number!)" : ""))
+                        .font(.caption).foregroundStyle(s.needsYou ? Color(Theme.amber) : Color(Theme.muted))
+                        .fixedSize()
+                        .accessibilityIdentifier("sidebar.state.\(s.id)")
+                    if let branch = CenterTabGate.usableBranch(s.branch) {
+                        Text(branch).font(Theme.mono(.caption2)).foregroundStyle(Color(Theme.faint)).lineLimit(1).truncationMode(.middle)
+                            .accessibilityIdentifier("sidebar.branch.\(s.id)")
+                    }
+                }
+                if let note = s.sidebarNote {
+                    Text(note).font(.caption2).foregroundStyle(Color(Theme.muted)).lineLimit(1).truncationMode(.tail)
+                        .help(note)
+                        .accessibilityIdentifier("sidebar.note.\(s.id)")
+                }
             }
             Spacer()
             if let remote = s.remote {

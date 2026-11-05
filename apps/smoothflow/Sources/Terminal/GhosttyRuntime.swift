@@ -132,10 +132,50 @@ final class GhosttyRuntime {
         }
     }
 
+    /// Find and links (SMOODEV-4266). The search runs on its own thread, so
+    /// these arrive on either side: copy what the action carries, then hop.
+    /// Nil means the action is not one of these.
+    nonisolated private static func handleFindOrLink(view: TerminalSurfaceView, action: ghostty_action_s) -> Bool? {
+        switch action.tag {
+        case GHOSTTY_ACTION_START_SEARCH:
+            let needle = action.action.start_search.needle.map { String(cString: $0) }
+            onMain { view.startFind(needle: needle) }
+            return true
+        case GHOSTTY_ACTION_END_SEARCH:
+            onMain { view.endFind() }
+            return true
+        case GHOSTTY_ACTION_SEARCH_TOTAL:
+            let total = Int(action.action.search_total.total)
+            onMain { view.findTotalChanged(total) }
+            return true
+        case GHOSTTY_ACTION_SEARCH_SELECTED:
+            let selected = Int(action.action.search_selected.selected)
+            onMain { view.findSelectedChanged(selected) }
+            return true
+        case GHOSTTY_ACTION_OPEN_URL:
+            // True even for a refused link: false makes libghostty open it itself.
+            let link = action.action.open_url
+            guard let url = link.url else { return true }
+            let text = String(decoding: UnsafeBufferPointer(start: UnsafeRawPointer(url).assumingMemoryBound(to: UInt8.self), count: Int(link.len)), as: UTF8.self)
+            onMain { view.openLink(text) }
+            return true
+        case GHOSTTY_ACTION_MOUSE_OVER_LINK:
+            let link = action.action.mouse_over_link
+            let text = link.url.flatMap { url in
+                link.len > 0 ? String(decoding: UnsafeBufferPointer(start: UnsafeRawPointer(url).assumingMemoryBound(to: UInt8.self), count: Int(link.len)), as: UTF8.self) : nil
+            }
+            onMain { view.showHoveredLink(text) }
+            return true
+        default:
+            return nil
+        }
+    }
+
     nonisolated private static func handleActionOffMain(target: ghostty_target_s, action: ghostty_action_s) -> Bool {
         guard target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
               let ud = ghostty_surface_userdata(surface) else { return false }
         let view = Unmanaged<TerminalSurfaceView>.fromOpaque(ud).takeUnretainedValue()
+        if let handled = handleFindOrLink(view: view, action: action) { return handled }
         switch action.tag {
         case GHOSTTY_ACTION_SET_TITLE, GHOSTTY_ACTION_SET_TAB_TITLE:
             guard let t = action.action.set_title.title else { return true }
@@ -158,7 +198,7 @@ final class GhosttyRuntime {
             DispatchQueue.main.async { view.pwdChanged(pwd) }
             return true
         case GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY,
-             GHOSTTY_ACTION_MOUSE_OVER_LINK, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
+             GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
              GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_SELECTION_CHANGED:
             return true
         default:
@@ -170,6 +210,7 @@ final class GhosttyRuntime {
         guard target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
               let ud = ghostty_surface_userdata(surface) else { return false }
         let view = Unmanaged<TerminalSurfaceView>.fromOpaque(ud).takeUnretainedValue()
+        if let handled = handleFindOrLink(view: view, action: action) { return handled }
         switch action.tag {
         case GHOSTTY_ACTION_SET_TITLE, GHOSTTY_ACTION_SET_TAB_TITLE:
             if let t = action.action.set_title.title { view.onTitle?(String(cString: t)) }
@@ -187,7 +228,7 @@ final class GhosttyRuntime {
             if let p = action.action.pwd.pwd { view.pwdChanged(String(cString: p)) }
             return true
         case GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY,
-             GHOSTTY_ACTION_MOUSE_OVER_LINK, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
+             GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
              GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_SELECTION_CHANGED:
             return true
         default:

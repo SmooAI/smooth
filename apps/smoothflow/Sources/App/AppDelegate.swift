@@ -3,6 +3,7 @@ import Sparkle
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let palette = CommandPaletteController()
     let app = AppController()
     /// Sparkle OTA. Feed + key live in Info.plist (SUFeedURL / SUPublicEDKey);
     /// checks hourly on its own, the menu item is the manual path.
@@ -105,9 +106,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        edit.addItem(item(.find))
+        edit.addItem(item(.findNext))
+        edit.addItem(item(.findPrevious))
         bar.addItem(submenu(edit, "Edit"))
 
         let view = NSMenu()
+        view.addItem(item(.commandPalette))
+        view.addItem(.separator())
         view.addItem(item(.inbox))
         view.addItem(.separator())
         view.addItem(item(.viewTerminal))
@@ -243,13 +250,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `representedObject`, so a rebind never has to touch a selector.
     @objc private func runAction(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let action = FlowAction(rawValue: raw) else { return }
-        run(action, tag: sender.tag)
+        TabLatency.measure(raw) { run(action, tag: sender.tag) }
     }
 
     func run(_ action: FlowAction, tag: Int = 0) {
         let center = app.mainWindow?.center
         switch action {
         case .settings: app.showSettings()
+        case .commandPalette: showCommandPalette()
+        case .find: center?.showFind()
+        case .findNext: center?.navigateFind(forward: true)
+        case .findPrevious: center?.navigateFind(forward: false)
         case .newSession: app.showNewSession()
         case .newShellInDirectory: app.showNewShellInDirectory()
         case .fanOut: app.showFanOut()
@@ -289,6 +300,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
              .diffToggleViewed, .diffComment, .diffRevertHunk, .diffStageHunk, .diffToggleSplit:
             center?.diffView.perform(action)
         default: app.focus(index: FlowAction.focusSessionIndex(action) ?? tag)
+        }
+    }
+
+    /// ⌘⇧P (SMOODEV-4266). It lists what the keymap's registry and the fleet
+    /// hold right now, and a chosen action runs through `run` like a menu item.
+    private func showCommandPalette() {
+        let sessions = app.store.grouped.flatMap(\.sessions)
+        let items = CommandPalette.sessions(sessions) + CommandPalette.actions { [app] in app.keymap.chord(for: $0) }
+        palette.toggle(over: app.mainWindow?.window, items: items) { [weak self] target in
+            switch target {
+            case let .action(action): self?.run(action)
+            case let .session(id): self?.app.focus(id)
+            }
         }
     }
 

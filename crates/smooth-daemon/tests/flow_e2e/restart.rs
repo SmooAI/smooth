@@ -143,10 +143,13 @@ async fn a_relaunch_continues_the_sessions_seq_and_replays_to_attached_clients()
     let new_pid = d.host_pid(&id).expect("a new host record");
     assert_ne!(new_pid, old_pid, "a new host process");
     assert!(!Daemon::pid_alive(old_pid), "the old host was released");
-    // The relaunch streams to the client that was already attached.
-    ws.wait_for("output from the resumed agent", WAIT, |v| {
-        v["type"] == "flow.output" && v["id"] == id && unb64(v["data_b64"].as_str().unwrap_or("")).contains("resume=1")
-    })
-    .await;
+    // The relaunch reaches the client that was already attached: in that replay
+    // if the agent has printed by then, as live output if it has not.
+    if !unb64(replay["data_b64"].as_str().unwrap_or("")).contains("resume=1") {
+        ws.wait_for("output from the resumed agent", WAIT, |v| {
+            v["type"] == "flow.output" && v["id"] == id && unb64(v["data_b64"].as_str().unwrap_or("")).contains("resume=1")
+        })
+        .await;
+    }
     d.kill(&id, false).await;
 }

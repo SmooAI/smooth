@@ -131,6 +131,17 @@ final class KeymapTests: XCTestCase {
 
     /// SMOODEV-4127: ⌘⇧R renames the tab (cmux's chord), a Tabs action, and
     /// ⌘⌥R stays Kill & Resume.
+    func testFindAndThePaletteShipWithTheChordsEveryTerminalUses() {
+        let map = Keymap.default
+        XCTAssertEqual(map.appAction(for: KeyChord("f", command: true)), .find)
+        XCTAssertEqual(map.appAction(for: KeyChord("g", command: true)), .findNext)
+        XCTAssertEqual(map.appAction(for: KeyChord("g", command: true, shift: true)), .findPrevious)
+        XCTAssertEqual(map.appAction(for: KeyChord("p", command: true, shift: true)), .commandPalette)
+        XCTAssertEqual(FlowAction.find.category, .terminal)
+        let moved = Keymap.parse("[keys]\nfind = \"cmd+opt+f\"\n")
+        XCTAssertEqual(moved.appAction(for: KeyChord("f", command: true, option: true)), .find, "rebindable in keybindings.toml")
+    }
+
     func testCommandShiftRRenamesTheTab() {
         XCTAssertEqual(Keymap.default.chord(for: .renameTab), KeyChord("r", command: true, shift: true))
         XCTAssertEqual(Keymap.default.appAction(for: KeyChord("r", command: true, shift: true)), .renameTab)

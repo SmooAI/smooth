@@ -24,9 +24,10 @@ apps/smoothflow/
 ├── Resources/   SmoothFlow.icns + SVG masters, MenuBarTemplate.png (status item glyph)
 ├── Sources/
 │   ├── Flow/        FlowFrame (codec) · FlowStore (reducer) · FlowClient (WS) · DaemonAddress · DaemonManager
-│   ├── Terminal/    GhosttyRuntime (one ghostty_app) · TerminalSurfaceView (NSView per session)
+│   ├── Terminal/    GhosttyRuntime (one ghostty_app) · TerminalSurfaceView (NSView per session) · TerminalFind · TerminalLink
 │   ├── UI/          MainWindow (AppKit split) · CenterViewController (tabs, splits, steer bar)
 │   │                FleetSidebar · PearlRail · InboxView · Sheets · SettingsView (SwiftUI in NSHostingView)
+│   │                CommandPalette (⌘⇧P: AppKit panel and field over a SwiftUI list)
 │   ├── Permissions/ Permissions (TCC status + asks) · AttentionNotifier (attention → UNNotification)
 │   └── App/         AppController (coordinator) · AppDelegate (menus, shortcuts)
 ├── Tests/           XCTest: frame codec, store reducer, notification mapping, address resolution
@@ -69,6 +70,25 @@ On a `pty` session (`flow.session.host == "pty"`) the surface uses
 the same manual I/O, but ghostty's parser doesn't answer DA/DSR and similar
 queries, because the session host already did (ADR-014). A tmux session keeps
 `GHOSTTY_SURFACE_IO_MANUAL`, since tmux swallows its client's answers.
+
+### A tab switch stays off the slow path (SMOODEV-4127)
+
+Each surface tab keeps its own `PaneTreeView`, stacked in one area with only the
+active one visible, so a switch is a hide and a show. It does not rebuild split
+views or re-parent surfaces. `TerminalSurfaceView` pushes a size to Ghostty only
+when the pixel size changed, and ignores re-parent notifications that leave the
+window and scale the same. `SurfaceTabBar.change` restyles the strip in place
+unless a tab came or went.
+
+A tree can be built before it has a size (at launch, or on a restored tab's
+first show). Its saved fractions then wait for the first `layout`, so the split
+view's default division never overwrites them.
+
+To measure it, `TabLatency` logs queue, handler and on-screen times per action:
+
+```bash
+log stream --predicate 'subsystem == "ai.smoo.smoothflow" AND category == "latency"' --level debug
+```
 
 ### The layout survives a relaunch (SMOODEV-4238, ADR-014)
 

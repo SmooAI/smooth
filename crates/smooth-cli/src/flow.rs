@@ -821,6 +821,8 @@ fn new_body(a: &NewArgs) -> Value {
         "title": a.title,
         "tmux_socket": a.tmux_socket,
         "argv": if a.argv.is_empty() { Value::Null } else { json!(a.argv) },
+        // A terminal has nobody watching a row: say here if it failed.
+        "wait": true,
     });
     if let Some(host) = &a.ssh {
         body["remote"] = json!({ "host": host, "cwd": a.remote_cwd });
