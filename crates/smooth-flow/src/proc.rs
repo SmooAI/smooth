@@ -162,7 +162,11 @@ pub fn parse_ps_tpgid_comm(s: &str) -> Option<(u32, String)> {
     let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
     let (tpgid, comm) = line.split_once(char::is_whitespace)?;
     let comm = command_name(comm);
-    (!comm.is_empty()).then_some((tpgid.trim().parse().ok()?, comm))
+    // Linux prints -1 for a process with no controlling terminal, and macOS
+    // prints 0. Both mean nothing is in the foreground, which callers read as 0.
+    let tpgid = tpgid.trim().parse::<i64>().ok()?;
+    let tpgid = u32::try_from(tpgid).unwrap_or(0);
+    (!comm.is_empty()).then_some((tpgid, comm))
 }
 
 /// A `ps -o comm` value as tmux names a command: macOS prints the
@@ -302,6 +306,14 @@ mod tests {
         assert_eq!(command_name("-/bin/zsh"), "-zsh");
         assert_eq!(command_name("node"), "node");
         assert_eq!(command_name("-"), "");
+    }
+
+    #[test]
+    fn a_negative_tpgid_means_no_terminal_rather_than_a_parse_failure() {
+        assert_eq!(parse_ps_tpgid_comm("   -1 sleep\n"), Some((0, "sleep".to_string())));
+        assert_eq!(parse_ps_tpgid_comm("    0 sleep\n"), Some((0, "sleep".to_string())));
+        assert_eq!(parse_ps_tpgid_comm("  123 sleep\n"), Some((123, "sleep".to_string())));
+        assert_eq!(parse_ps_tpgid_comm("nope sleep\n"), None);
     }
 
     #[test]
