@@ -46,17 +46,26 @@ enum BrowserKeyboard {
     }
 }
 
+/// A window whose browser panes cannot take the keyboard on a page's say-so.
+/// A page's `focus()` makes WebKit call `makeFirstResponder` on the window
+/// directly, without consulting `acceptsFirstResponder`, and a web view refusing
+/// in `becomeFirstResponder` would still cost the old responder the keyboard.
+/// This is the one place to say no before anything has changed.
+class BrowserSafeWindow: NSWindow {
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        if let web = responder as? BrowserWebView, !web.mayTakeKeyboard { return false }
+        return super.makeFirstResponder(responder)
+    }
+}
+
 /// A web view that says when the keyboard arrives, so its pane becomes the
-/// focused one, the way a terminal surface does, and that a page cannot give
-/// the keyboard to.
-private final class BrowserWebView: WKWebView {
+/// focused one, the way a terminal surface does.
+final class BrowserWebView: WKWebView {
     var onFocus: (() -> Void)?
     /// The app itself is handing over the keyboard.
     var keyboardGranted = false
 
-    override var acceptsFirstResponder: Bool {
-        keyboardGranted || BrowserKeyboard.userAsked(by: NSApp.currentEvent, for: self)
-    }
+    var mayTakeKeyboard: Bool { keyboardGranted || BrowserKeyboard.userAsked(by: NSApp.currentEvent, for: self) }
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()

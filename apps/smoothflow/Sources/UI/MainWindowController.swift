@@ -9,7 +9,7 @@ final class MainWindowController: NSWindowController {
 
     init(app: AppController) {
         center = CenterViewController(app: app)
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 820),
+        let w = BrowserSafeWindow(contentRect: NSRect(x: 0, y: 0, width: 1320, height: 820),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
         w.title = "SmoothFlow"

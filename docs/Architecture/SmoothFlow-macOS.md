@@ -142,6 +142,13 @@ scripts. `BrowserPaneView` refuses downloads, camera and microphone, and it keep
 `target=_blank` and clicked `window.open` in the pane. Script cannot open windows
 by itself. Web Inspector is off. Agent control of the browser is not built.
 
+**A page cannot take the keyboard.** A page's `focus()` makes WebKit call
+`makeFirstResponder` on the window directly, and that ignores
+`acceptsFirstResponder`, so a page loading beside a terminal could take keystrokes
+meant for an agent. `BrowserSafeWindow` (the main window's class) turns those calls
+down. The web view takes the keyboard only from the app, from a recent click in it,
+or from Tab.
+
 **Only http and https.** `BrowserURL` has the rules:
 
 | Where                                   | Rule                                                                                                  |
@@ -166,6 +173,10 @@ defaults.
 
 Not built: find in page (⌘F does nothing on a browser pane), file uploads, and
 downloads.
+
+Known gap: WebKit blocks some ports outright (port 1, for example) and reports
+nothing to the navigation delegate, so such a URL leaves a blank page with no
+message. A refused connection on any other port does show a message.
 
 ## Daemon lifecycle and TCC — the part cmux gets wrong
 

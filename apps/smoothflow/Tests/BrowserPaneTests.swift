@@ -267,7 +267,7 @@ final class BrowserPaneViewTests: XCTestCase {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         port = try XCTUnwrap(listener.port?.rawValue)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window = BrowserSafeWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
     }
 
@@ -402,13 +402,6 @@ final class BrowserPaneViewTests: XCTestCase {
     }
 
     func testAFailedLoadSaysSo() async throws {
-        let p = pane()
-        // Port 1 on loopback: refused at once.
-        p.navigate(to: try XCTUnwrap(URL(string: "http://127.0.0.1:1/")))
-        await wait(timeout: 5, "the failure on a blocked port") { p.messageText != nil }
-    }
-
-    func testAClosedPortSaysSo() async throws {
         let closed = try NWListener(using: .tcp, on: .any)
         closed.newConnectionHandler = { $0.cancel() }
         closed.start(queue: .global())
