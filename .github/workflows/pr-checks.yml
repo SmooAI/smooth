@@ -54,6 +54,16 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
+            # SMOODEV-4238: one job compiles the workspace in several feature sets
+            # (default, pty-host, admin, release) and the standard runner ran out
+            # of disk during Test (pty-host), which kills the runner with no log.
+            # These preinstalled SDKs are never used here and are ~25 GB.
+            - name: Free runner disk
+              if: runner.os == 'Linux'
+              run: |
+                  sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+                  df -h /
+
             # th-6578ee: a bash/JSON/doc-only PR was compiling the whole Rust
             # workspace on TWO platforms (Windows bills at 2x) plus a full web
             # build — ~45 min of runner time to validate a shell script.

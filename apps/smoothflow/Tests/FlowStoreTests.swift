@@ -210,6 +210,46 @@ final class FlowStoreIntegrationTests: XCTestCase {
         XCTAssertEqual(store.apply(.session(a)), [.finished(a)], "a terminal state never re-attaches")
     }
 
+    /// SMOODEV-4267: the row exists before the process, so its first pid is not
+    /// a relaunch. The surface's attach is already held by the engine.
+    func testFirstPidOnALiveRowIsNotARelaunch() {
+        let store = FlowStore()
+        var a = s("a"); a.state = .starting
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: []))
+        XCTAssertEqual(store.apply(.session(a)), [], "a new row with no process yet")
+        a.pid = 100
+        XCTAssertEqual(store.apply(.session(a)), [], "nil to a pid: its first process")
+        a.state = .idle
+        XCTAssertEqual(store.apply(.session(a)), [], "reading ready changes nothing")
+        a.pid = 200
+        XCTAssertEqual(store.apply(.session(a)), [.relaunched(id: "a")], "pid A to pid B: a new process")
+    }
+
+    /// The engine writes the new pid while the row still reads dead, then
+    /// flips it to starting, so comparing pids alone never sees the resume.
+    func testResumingAFinishedRowIsARelaunch() {
+        let store = FlowStore()
+        var a = s("a"); a.state = .dead; a.pid = 100
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [a]))
+        a.pid = 200
+        XCTAssertEqual(store.apply(.session(a)), [], "still dead: nothing to attach to")
+        a.state = .starting
+        XCTAssertEqual(store.apply(.session(a)), [.relaunched(id: "a")], "live again under the new pid")
+        a.state = .idle
+        XCTAssertEqual(store.apply(.session(a)), [], "once")
+    }
+
+    /// A row whose launch failed never had a pid, and nothing attached once it died.
+    func testResumingARowThatNeverLaunchedIsARelaunch() {
+        let store = FlowStore()
+        var a = s("a"); a.state = .dead
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [a]))
+        a.pid = 100
+        XCTAssertEqual(store.apply(.session(a)), [], "still dead")
+        a.state = .starting
+        XCTAssertEqual(store.apply(.session(a)), [.relaunched(id: "a")])
+    }
+
     func testHandoffPushBecomesAnEffectOnlyForKnownSessions() {
         let store = FlowStore()
         store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("a")]))

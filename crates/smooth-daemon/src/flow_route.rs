@@ -100,6 +100,7 @@ pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<
     let mut cfg = smooth_flow::EngineConfig {
         daemon_url,
         harness_doctor: harness_doctor_enabled(std::env::var("SMOOTH_FLOW_HARNESS_DOCTOR").ok().as_deref()),
+        boot_watch: true,
         // th-145e6b: the New Session picker searches every checkout in $HOME.
         repo_root: dirs_next::home_dir(),
         ..smooth_flow::EngineConfig::new(workspace)
@@ -259,6 +260,11 @@ struct NewBody {
     /// SMOODEV-4111: start in this session's live working directory.
     #[serde(default)]
     cwd_of: Option<String>,
+    /// SMOODEV-4267: answer only once the session has launched, with a
+    /// failure as an error (`th flow new`). By default the reply is the
+    /// `starting` row, and a failure lands on it.
+    #[serde(default)]
+    wait: bool,
 }
 
 impl From<NewBody> for NewRequest {
@@ -287,7 +293,18 @@ async fn new_session(
 ) -> Result<Json<Value>, ApiErr> {
     gate(&st, &headers, &q)?;
     let e = st.engine.clone();
-    let s = blocking(move || e.new_session(body.into())).await?;
+    let asked = std::time::Instant::now();
+    let wait = body.wait;
+    let s = blocking(move || {
+        smooth_flow::timing::stage("-", "pool_queue", asked);
+        if wait {
+            e.new_session(body.into())
+        } else {
+            e.begin_session(body.into())
+        }
+    })
+    .await?;
+    smooth_flow::timing::stage(&s.id, "response", asked);
     Ok(Json(json!({ "session": s })))
 }
 
@@ -978,7 +995,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
                 tmux_socket,
                 cwd_of,
             };
-            let s = run(engine, move |e| e.new_session(req)).await?;
+            let s = run(engine, move |e| e.begin_session(req)).await?;
             Ok(vec![ServerFrame::Session { session: s }])
         }
         ClientFrame::Send { id, text } => {
@@ -1138,6 +1155,7 @@ mod tests {
             home: tmp.join("home"),
             daemon_url: Some("http://127.0.0.1:1".into()),
             harness_doctor: false,
+            boot_watch: false,
             repo_root: None,
             host: smooth_flow::host::default_host(),
             pty_host: None,
@@ -1533,6 +1551,49 @@ mod tests {
             kinds,
             vec![("user".to_string(), "go".to_string()), ("system".to_string(), "working".to_string())]
         );
+    }
+
+    /// SMOODEV-4267: `POST /api/flow/sessions` answers with the `starting`
+    /// row and a failure lands on it; `wait` asks for the old contract.
+    #[tokio::test]
+    async fn new_answers_starting_and_fails_on_the_row_unless_asked_to_wait() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let post = |body: &Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/flow/sessions")
+                .header("content-type", "application/json")
+                .header("x-smooth-token", "tok")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_repo = tmp.path().join("plain");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        let engine = engine(tmp.path());
+        let app = flow_router(engine.clone(), Some("tok".into()));
+        let body = json!({"kind":"claude","project":not_a_repo,"pearl_id":"th-abc123"});
+        let resp = app.clone().oneshot(post(&body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["session"]["state"], "starting", "{v}");
+        let id = v["session"]["id"].as_str().unwrap().to_string();
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let row = engine.get(&id).unwrap().unwrap();
+            if row.state.as_str() == "dead" {
+                assert_eq!(row.attention.unwrap().reason, smooth_flow::engine::LAUNCH_FAILED);
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the failure never reached the row");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut waiting = body;
+        waiting["wait"] = json!(true);
+        let resp = app.oneshot(post(&waiting)).await.unwrap();
+        assert!(!resp.status().is_success(), "{}", resp.status());
     }
 
     /// th-d33afa: `flow.attach` replays the buffered stream (needs a live
