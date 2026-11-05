@@ -272,7 +272,14 @@ jobs:
             # this lane's report.
             - name: Test (admin feature)
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
-              run: cargo nextest run -p smooai-smooth-cli --features admin
+              # ci_queue copies the th binary into the temp dir when it cannot
+              # hard-link across filesystems, and that copy hit "Disk quota
+              # exceeded" in /tmp on main. A temp dir beside target/ can link.
+              run: |
+                  du -sh /tmp 2>/dev/null || true
+                  export TMPDIR="$PWD/target/tmp-admin"
+                  mkdir -p "$TMPDIR"
+                  cargo nextest run -p smooai-smooth-cli --features admin
               env:
                   RUST_MIN_STACK: 8388608
 
