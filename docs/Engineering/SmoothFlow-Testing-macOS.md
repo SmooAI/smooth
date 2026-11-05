@@ -29,6 +29,8 @@ fixed sleep. A failing test attaches a screenshot to the result bundle.
 
 Accessibility identifiers the tests key on: `sidebar.session.<id>`,
 `sidebar.title.<id>`, `sidebar.state.<id>`, `sidebar.connection`,
+`sidebar.branch.<id>`, `sidebar.note.<id>`, `find.bar`, `find.field`, `find.count`,
+`find.previous`, `find.next`, `find.close`, `palette.field`, `palette.row.<id>`,
 `sidebar.needsYou`, `pane.header`, `center.path`, `center.tabs`, `steer.field`,
 `inbox.card.<id>`, `inbox.allow.<id>` / `inbox.deny.<id>` /
 `inbox.allowSession.<id>`, `inbox.finished.<id>`, `inbox.close.<id>` (opens the

@@ -222,6 +222,8 @@ Windows Terminal. The fleet-action family (`⌘⌥` on the Mac) is **Ctrl+Alt**.
 | Terminal / Diff / PR / Activity   | ⌘⌥1–4                 | Ctrl+Alt+1–4                                                  |
 | Toggle Sidebar / Pearl Rail       | ⌃⌘S / ⌃⌘P             | Ctrl+Shift+Alt+S / Ctrl+Shift+Alt+P                           |
 | Settings                          | ⌘,                    | Ctrl+,                                                        |
+| Command Palette                   | ⌘⇧P                   | Ctrl+Shift+P                                                  |
+| Find / Next / Previous            | ⌘F / ⌘G / ⌘⇧G         | Ctrl+Shift+F / Ctrl+Shift+G / Ctrl+Shift+Alt+G                |
 
 Every action is also reachable from the menus (desktop) or an explicit control
 (phones). Phones have no shortcut layer, so every action must have a visible
@@ -405,6 +407,11 @@ control.
   put a pinned title first and never let a pearl replace a shell's live name.
   `title.json` and `keymap.json` gain cases, and the existing cases are
   unchanged.
+- 2026-11-04: §9 gains Command Palette, Find, Find Next and Find Previous
+  (SMOODEV-4266): ⌘⇧P, ⌘F, ⌘G and ⌘⇧G on the Mac, and Ctrl+Shift+P,
+  Ctrl+Shift+F, Ctrl+Shift+G and Ctrl+Shift+Alt+G elsewhere. `keymap.json` gains
+  cases, and the existing cases are unchanged. The Mac app builds these first;
+  other clients report that the action isn't in their build yet.
 
 ## 14. Diff
 

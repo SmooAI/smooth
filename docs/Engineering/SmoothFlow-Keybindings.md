@@ -205,6 +205,41 @@ renames, Esc cancels, and an empty name goes back to the automatic one. The
 name is stored on the row (`flow.rename`) and is pinned, so a shell's live
 name stops replacing it. `renameTab` is the row in the file.
 
+## Find, links and the command palette (SMOODEV-4266)
+
+**⌘F finds in the terminal.** ⌘G and ⌘⇧G go to the next and previous match, and
+Return and ⇧Return do the same from the field. Esc closes the bar and gives the
+keyboard back to the terminal. libghostty does the searching: the bar sends
+`search:<needle>` and `navigate_search:*` binding actions, and the counts come
+back as `SEARCH_TOTAL` and `SEARCH_SELECTED`. One- and two-letter needles wait
+0.25 s for the next keystroke. The bar belongs to the surface, so an open search
+stays with its session when a pane or tab moves it. Ghostty's own keybinds, such
+as `search_selection`, open the same bar. Find works on the Terminal tab only.
+
+**⌘-click opens links.** libghostty finds URLs and paths in the output and raises
+`OPEN_URL`. While you hold ⌘ over one, the target shows at the pane's bottom left.
+Terminal output is untrusted, so `TerminalLink.resolve` limits what a click does:
+
+| Link                                          | ⌘-click                    |
+| --------------------------------------------- | -------------------------- |
+| `http`, `https`, `mailto`, `ftp`, `ssh`       | opens                      |
+| any other URL scheme                          | refused, with a beep       |
+| a file or folder                              | opens in its default app   |
+| an executable, `.app`, `.command` and similar | shown in Finder, never run |
+| a path that does not exist                    | refused, with a beep       |
+
+Relative paths resolve against the directory the program announced (OSC 7), else
+the session's worktree. A trailing `:12:3` is dropped when the path with it does
+not exist.
+
+**⌘⇧P is the command palette.** It searches sessions and actions. Its actions come
+from `FlowAction`, so a new action appears there by itself and a rebound chord
+shows its new keys. It leaves out diff keys (they only work inside the diff),
+aliases, and Focus Session N, because sessions are listed by name. Each
+whitespace-separated word must match the title or the detail as an in-order
+subsequence. ↑↓ move, Return runs through the same path as the menu item, and Esc
+or clicking elsewhere closes it.
+
 ## Tests
 
 - `Tests/PaneCloseTests.swift` — the ⌘W decision: what is asked and what is
@@ -223,16 +258,22 @@ name stops replacing it. `renameTab` is the row in the file.
   last directory, else `$HOME`), and that `cwd_of` stays off the wire unset.
   Also checks that the `flow.prewarm` hint names the same directory, and that
   a blank rename resets the name.
+- `Tests/TerminalFindTests.swift` — the bar's rules, and searches against a real
+  libghostty surface (counts, walking matches, Esc handing back the keyboard).
+- `Tests/TerminalLinkTests.swift` — what a click may open, and ⌘-click end to end
+  through libghostty for a URL and a file path.
+- `Tests/CommandPaletteTests.swift` — the listed actions, ranking, and the window's
+  keyboard handling.
 - `UITests/LayoutUITests.swift` — the real app against the mock fleet: ⌘⇧
   arrows split with a new shell, ⌘N opens a shell tab with no sheet, ⌘D/⌘⇧D
   split, ⌘W asks before closing a live agent's pane (Cancel leaves it alone),
   ⌘⇧W takes the whole tab, ⌘⇧↩ zooms, ⌘T/⌘W and ⌘⇧[ / ⌘⇧] move between tabs, splits
-  stay in their tab, and the Keyboard pane renders.
+  stay in their tab, the Keyboard pane renders, ⌘F finds and ⌘⇧P runs an action.
 
 ## Deliberately not in this pass
 
-- **Layout persistence across relaunch.** Tabs and splits are per-run.
-- **A command palette** (⌘⇧P over sessions, actions and harnesses).
+- **Harnesses in the command palette.** It lists sessions and actions only.
+- **A global hotkey** to summon the window from another app.
 - **Chord sequences** (`ctrl+a` then `|`, tmux-style). The file format has room
   for it — the value is a string — but nothing parses a second chord yet.
 - **Per-context bindings.** A chord means the same thing everywhere; there is no

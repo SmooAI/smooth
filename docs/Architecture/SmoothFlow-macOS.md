@@ -24,9 +24,10 @@ apps/smoothflow/
 ├── Resources/   SmoothFlow.icns + SVG masters, MenuBarTemplate.png (status item glyph)
 ├── Sources/
 │   ├── Flow/        FlowFrame (codec) · FlowStore (reducer) · FlowClient (WS) · DaemonAddress · DaemonManager
-│   ├── Terminal/    GhosttyRuntime (one ghostty_app) · TerminalSurfaceView (NSView per session)
+│   ├── Terminal/    GhosttyRuntime (one ghostty_app) · TerminalSurfaceView (NSView per session) · TerminalFind · TerminalLink
 │   ├── UI/          MainWindow (AppKit split) · CenterViewController (tabs, splits, steer bar)
 │   │                FleetSidebar · PearlRail · InboxView · Sheets · SettingsView (SwiftUI in NSHostingView)
+│   │                CommandPalette (⌘⇧P: AppKit panel and field over a SwiftUI list)
 │   ├── Permissions/ Permissions (TCC status + asks) · AttentionNotifier (attention → UNNotification)
 │   └── App/         AppController (coordinator) · AppDelegate (menus, shortcuts)
 ├── Tests/           XCTest: frame codec, store reducer, notification mapping, address resolution

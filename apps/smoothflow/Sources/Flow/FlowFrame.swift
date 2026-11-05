@@ -135,6 +135,13 @@ struct Session: Codable, Equatable, Identifiable {
     /// (SmoothFlow.md § Replay, engine rule 7).
     var hostAnswersQueries: Bool { host == "pty" }
 
+    /// What the session last asked for, on one line, while it is still asking.
+    var sidebarNote: String? {
+        guard let line = attention?.detail?.split(whereSeparator: \.isNewline).first else { return nil }
+        let text = line.trimmingCharacters(in: .whitespaces)
+        return text.isEmpty ? nil : text
+    }
+
     /// Sidebar label: pearl id when there is one, else the title.
     var label: String { pearlId.map { "\($0) \(title)" } ?? title }
     var projectName: String { (project as NSString).lastPathComponent.isEmpty ? project : (project as NSString).lastPathComponent }

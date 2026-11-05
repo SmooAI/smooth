@@ -110,6 +110,10 @@ actions! {
     ToggleSidebar => "toggleSidebar", "Toggle Sidebar";
     TogglePearlRail => "togglePearlRail", "Toggle Pearl Rail";
     Settings => "settings", "Settings…";
+    CommandPalette => "commandPalette", "Command Palette…";
+    Find => "find", "Find…";
+    FindNext => "findNext", "Find Next";
+    FindPrevious => "findPrevious", "Find Previous";
 }
 
 impl Action {
@@ -165,6 +169,10 @@ impl Action {
             Self::ToggleSidebar => ("ctrl+cmd+s", "ctrl+shift+alt+s"),
             Self::TogglePearlRail => ("ctrl+cmd+p", "ctrl+shift+alt+p"),
             Self::Settings => ("cmd+,", "ctrl+,"),
+            Self::CommandPalette => ("cmd+shift+p", "ctrl+shift+p"),
+            Self::Find => ("cmd+f", "ctrl+shift+f"),
+            Self::FindNext => ("cmd+g", "ctrl+shift+g"),
+            Self::FindPrevious => ("cmd+shift+g", "ctrl+shift+alt+g"),
             _ => return None,
         };
         c(match platform {

@@ -266,6 +266,158 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         window?.invalidateCursorRects(for: self)
     }
 
+    // MARK: find (SMOODEV-4266)
+
+    /// Nil while the find bar is closed.
+    private(set) var findState: TerminalFindState?
+    private var findBar: TerminalFindBar?
+    private var pendingSearch: DispatchWorkItem?
+
+    /// Open the find bar and take the keyboard. A needle (Ghostty's
+    /// `search_selection`) replaces what the bar held and searches at once.
+    func startFind(needle: String? = nil) {
+        var state = findState ?? TerminalFindState()
+        if let needle, !needle.isEmpty { state.needle = needle }
+        let bar = findBar ?? makeFindBar()
+        bar.isHidden = false
+        setFindState(state)
+        bar.show(state)
+        bar.focusField()
+        if needle?.isEmpty == false { runSearch(state.needle) }
+    }
+
+    /// Close the bar and end the search. The keyboard comes back here only if
+    /// the bar had it, so a search ended from elsewhere moves no focus.
+    func endFind() {
+        guard findState != nil else { return }
+        let barHadKeyboard = findBar.map { (window?.firstResponder as? NSView)?.isDescendant(of: $0) == true } ?? false
+        pendingSearch?.cancel()
+        pendingSearch = nil
+        setFindState(nil)
+        findBar?.isHidden = true
+        bindingAction(TerminalFindState.searchAction(""))
+        if barHadKeyboard { window?.makeFirstResponder(self) }
+    }
+
+    /// ⌘G / ⌘⇧G. With the bar closed they open it.
+    func navigateFind(forward: Bool) {
+        guard let state = findState else { return startFind() }
+        // A needle still waiting out its debounce has to run first.
+        if pendingSearch != nil { runSearch(state.needle) }
+        bindingAction(TerminalFindState.navigateAction(forward: forward))
+    }
+
+    func findTotalChanged(_ raw: Int) {
+        guard var s = findState else { return }
+        s.total = TerminalFindState.reported(raw)
+        setFindState(s)
+    }
+
+    func findSelectedChanged(_ raw: Int) {
+        guard var s = findState else { return }
+        s.selected = TerminalFindState.reported(raw)
+        setFindState(s)
+    }
+
+    private func setFindState(_ state: TerminalFindState?) {
+        findState = state
+        if let state { findBar?.count.stringValue = state.countLabel }
+    }
+
+    private func makeFindBar() -> TerminalFindBar {
+        let bar = TerminalFindBar()
+        bar.onNeedle = { [weak self] in self?.needleEdited($0) }
+        bar.onNavigate = { [weak self] in self?.navigateFind(forward: $0) }
+        bar.onClose = { [weak self] in self?.endFind() }
+        bar.onFocus = { [weak self] in self?.onHostFocus?() }
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(bar)
+        NSLayoutConstraint.activate([
+            bar.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+        ])
+        findBar = bar
+        return bar
+    }
+
+    func needleEdited(_ needle: String) {
+        guard var s = findState else { return }
+        s.needle = needle
+        if needle.isEmpty {
+            s.total = nil
+            s.selected = nil
+        }
+        setFindState(s)
+        pendingSearch?.cancel()
+        pendingSearch = nil
+        let delay = TerminalFindState.debounce(forNeedle: needle)
+        guard delay > 0 else { return runSearch(needle) }
+        let work = DispatchWorkItem { [weak self] in self?.runSearch(needle) }
+        pendingSearch = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func runSearch(_ needle: String) {
+        pendingSearch?.cancel()
+        pendingSearch = nil
+        bindingAction(TerminalFindState.searchAction(needle))
+    }
+
+    /// Run a libghostty keybind action by name.
+    @discardableResult
+    private func bindingAction(_ action: String) -> Bool {
+        guard let surface else { return false }
+        return action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
+    }
+
+    // MARK: links (SMOODEV-4266)
+
+    /// Where a relative path resolves when the program never announced a
+    /// directory (OSC 7): the session's worktree.
+    var fallbackDirectory: (() -> String?)?
+    private var linkLabel: NSTextField?
+
+    /// What a resolved link does. Tests replace it so nothing really opens.
+    var performLink: (TerminalLink.Target) -> Void = { TerminalLink.perform($0) }
+
+    func openLink(_ raw: String) {
+        performLink(TerminalLink.resolve(raw, cwd: reportedPwd ?? fallbackDirectory?()))
+    }
+
+    /// The link the pointer is over, while one is shown.
+    var hoveredLink: String? { linkLabel?.isHidden == false ? linkLabel?.stringValue : nil }
+
+    /// Show where a ⌘-click would go, at the surface's bottom left.
+    func showHoveredLink(_ url: String?) {
+        guard let url, !url.isEmpty else {
+            linkLabel?.isHidden = true
+            return
+        }
+        let label = linkLabel ?? makeLinkLabel()
+        label.stringValue = url
+        label.isHidden = false
+    }
+
+    private func makeLinkLabel() -> NSTextField {
+        let label = NSTextField(labelWithString: "")
+        label.font = Theme.monoNSFont(size: 11)
+        label.textColor = Theme.muted
+        label.drawsBackground = true
+        label.backgroundColor = .windowBackgroundColor
+        label.lineBreakMode = .byTruncatingMiddle
+        label.setAccessibilityIdentifier("terminal.link")
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+        ])
+        linkLabel = label
+        return label
+    }
+
     // MARK: keyboard
 
     override func keyDown(with event: NSEvent) {

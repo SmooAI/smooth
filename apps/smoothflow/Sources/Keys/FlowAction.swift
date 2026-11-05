@@ -55,6 +55,12 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case toggleSidebar
     case togglePearlRail
     case settings
+    case commandPalette
+
+    // Terminal (SMOODEV-4266)
+    case find
+    case findNext
+    case findPrevious
 
     // Diff viewer (th-26f5b9). Bare keys, live only while the Diff tab has
     // focus — never menu items (see `isViewScoped`). The table is the Client
@@ -78,6 +84,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case tabs = "Tabs"
         case splits = "Splits"
         case view = "View"
+        case terminal = "Terminal"
         case diff = "Diff Viewer"
         var id: String { rawValue }
     }
@@ -121,8 +128,10 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
              .focusPaneLeft, .focusPaneRight, .focusPaneUp, .focusPaneDown,
              .zoomPane, .equalizePanes:
             .splits
-        case .inbox, .viewTerminal, .viewDiff, .viewPR, .viewActivity, .toggleSidebar, .togglePearlRail, .settings:
+        case .inbox, .viewTerminal, .viewDiff, .viewPR, .viewActivity, .toggleSidebar, .togglePearlRail, .settings, .commandPalette:
             .view
+        case .find, .findNext, .findPrevious:
+            .terminal
         case .diffNextLine, .diffPreviousLine, .diffNextHunk, .diffPreviousHunk, .diffNextFile, .diffPreviousFile,
              .diffToggleViewed, .diffComment, .diffRevertHunk, .diffStageHunk, .diffToggleSplit:
             .diff
@@ -170,6 +179,10 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleSidebar: return "Toggle Sidebar"
         case .togglePearlRail: return "Toggle Pearl Rail"
         case .settings: return "Settings…"
+        case .commandPalette: return "Command Palette…"
+        case .find: return "Find…"
+        case .findNext: return "Find Next"
+        case .findPrevious: return "Find Previous"
         case .diffNextLine: return "Next Line"
         case .diffPreviousLine: return "Previous Line"
         case .diffNextHunk: return "Next Hunk"
@@ -261,6 +274,11 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleSidebar: return KeyChord("s", command: true, control: true)
         case .togglePearlRail: return KeyChord("p", command: true, control: true)
         case .settings: return KeyChord(",", command: true)
+        case .commandPalette: return KeyChord("p", command: true, shift: true)
+
+        case .find: return KeyChord("f", command: true)
+        case .findNext: return KeyChord("g", command: true)
+        case .findPrevious: return KeyChord("g", command: true, shift: true)
 
         case .diffNextLine: return KeyChord("j")
         case .diffPreviousLine: return KeyChord("k")

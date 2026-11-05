@@ -38,9 +38,9 @@ final class TerminalLocaleTests: XCTestCase {
         let dir = TerminalFont.resourcesDir(env: [:], ghosttyApp: "/none")
         XCTAssertEqual(dir, Bundle.main.resourceURL!.appendingPathComponent("ghostty").path, "the bundled copy wins")
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir! + "/themes/Catppuccin Mocha"), "a well-known theme is there")
-        // What GhosttyRuntime does before ghostty_init (the test host never
-        // builds a surface, so call it here and read the raw environ).
-        XCTAssertEqual(TerminalFont.exportResourcesDir(), dir)
+        // What GhosttyRuntime does before ghostty_init. Another test may have
+        // built the runtime already, so read the raw environ, not the result.
+        _ = TerminalFont.exportResourcesDir()
         XCTAssertEqual(getenv("GHOSTTY_RESOURCES_DIR").map { String(cString: $0) }, dir, "exported for libghostty")
     }
 }
