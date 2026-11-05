@@ -7399,7 +7399,8 @@ quiet_ms = 300
         let att = row(&e, &s.id).attention.unwrap();
         assert_eq!(att.reason, LAUNCH_FAILED);
         assert!(att.detail.unwrap().contains("creating the worktree"));
-        assert!(e.rt().launching.is_empty());
+        // The row goes dead inside the launch; the entry is removed after it returns.
+        soon("the launch to stop being pending", || e.rt().launching.is_empty());
         assert!(host.calls().iter().all(|c| !c.starts_with("launch ")));
 
         // The one that waits says so to its caller as well.
