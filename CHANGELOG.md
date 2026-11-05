@@ -1,5 +1,16 @@
 # @smooai/smooth
 
+## 0.93.0
+
+### Minor Changes
+
+- 6f3e876: SMOODEV-4266: SmoothFlow gets find in the terminal (⌘F, ⌘G, ⌘⇧G) with match counts, ⌘-click on URLs and file paths, and a command palette (⌘⇧P) over app actions and sessions. A link never launches anything: other URL schemes are refused, and executables are shown in Finder. The sidebar now shows each session's branch and what it is asking for. SmoothFlow Desktop's keymap gains the same actions, which report that they aren't in that build yet.
+
+### Patch Changes
+
+- 50fd27c: SMOODEV-4267: A new SmoothFlow agent's row and tab appear immediately, in `starting`, before its pearl worktree is made and before inference runs. A failure to make the worktree or launch shows on the row. Clients can attach, resize and type during the launch. `POST /api/flow/sessions` takes `wait: true` for callers that need the process before the reply, which `th flow new` uses. Agents read as ready sooner, and a pasted prompt lands sooner, because a booting agent is checked every 200 ms. Harness manifests are cached until a manifest file changes.
+- 20b062c: SmoothFlow: switching, opening and closing surface tabs no longer rebuilds split views or re-parents terminals. Each tab keeps its own pane tree, Ghostty is only resized when the size really changed, and the tab strip restyles in place. Middle-click closes a tab.
+
 ## 0.92.0
 
 ### Minor Changes
