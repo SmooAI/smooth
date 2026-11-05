@@ -111,8 +111,11 @@ impl HostKind {
         }
     }
 
-    /// The host `$SMOOTH_FLOW_HOST` asks for; tmux when it is unset, empty
-    /// or unknown (an unknown value is logged, not fatal).
+    /// The host `$SMOOTH_FLOW_HOST` asks for; the `pty` host when it is
+    /// unset, empty or unknown (an unknown value is logged, not fatal).
+    /// SMOODEV-4238 made `pty` the default; `tmux` is the opt-out. A daemon
+    /// built without a pty host still runs new sessions on tmux
+    /// ([`crate::Engine::open`]).
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_env_value(std::env::var(HOST_ENV).ok().as_deref())
@@ -121,13 +124,18 @@ impl HostKind {
     /// [`Self::from_env`] over an explicit value (pure, for tests).
     #[must_use]
     pub fn from_env_value(v: Option<&str>) -> Self {
-        v.map(str::trim).filter(|v| !v.is_empty()).map_or(Self::Tmux, |v| {
+        v.map(str::trim).filter(|v| !v.is_empty()).map_or(Self::NEW_SESSION_DEFAULT, |v| {
             Self::parse(v).unwrap_or_else(|| {
-                tracing::warn!(value = %v, "{HOST_ENV} is not `pty` or `tmux`; using tmux");
-                Self::Tmux
+                tracing::warn!(value = %v, "{HOST_ENV} is not `pty` or `tmux`; using {}", Self::NEW_SESSION_DEFAULT);
+                Self::NEW_SESSION_DEFAULT
             })
         })
     }
+
+    /// Where new sessions launch when nothing says otherwise. Not the
+    /// type's [`Default`], which stays `tmux`: that is what a row with no
+    /// `host` column (an older engine's) was launched on.
+    pub const NEW_SESSION_DEFAULT: Self = Self::Pty;
 }
 
 impl std::fmt::Display for HostKind {
@@ -302,6 +310,14 @@ pub trait SessionHost: Send + Sync {
         self.pid(s).ok().and_then(proc::cwd)
     }
 
+    /// [`Self::current_dir`] for many sessions at once (SMOODEV-4238: the
+    /// engine samples every shell's directory so a restore can reopen it
+    /// there). Sessions the host can't answer for are left out. The default
+    /// asks one at a time; a host whose answer costs a process spawn batches.
+    fn current_dirs(&self, sessions: &[SessionRef]) -> Vec<(SessionRef, PathBuf)> {
+        sessions.iter().filter_map(|s| self.current_dir(s).map(|d| (s.clone(), d))).collect()
+    }
+
     /// `Some(death)` once the session's process is dead (the host keeps the
     /// session until the engine has read this), `None` while it runs.
     ///
@@ -412,6 +428,14 @@ pub trait SessionHost: Send + Sync {
     /// When the host cannot rename (the default) or `s` is gone.
     fn rename(&self, s: &SessionRef, _to: &str) -> Result<()> {
         anyhow::bail!("this host cannot rename {}", s.name)
+    }
+
+    /// The name a spare for session `id` waits under. tmux's carries
+    /// [`crate::prewarm::SPARE_PREFIX`] (reaped by [`Self::list`]) and is
+    /// renamed on claim; a host that cannot rename launches it under `id`
+    /// itself, so a claim renames nothing (SMOODEV-4238).
+    fn spare_name(&self, id: &str) -> String {
+        crate::prewarm::spare_name(id)
     }
 
     /// Every session name in namespace `socket` (none when it can't tell).
@@ -618,6 +642,8 @@ pub mod fake {
         adoptions: Vec<Adopted>,
         /// Snapshots taken so far; each one's `seq`.
         snapshots: u64,
+        /// The latest attach stream per session, for [`FakeHost::typed`].
+        attaches: HashMap<SessionRef, Arc<FakeAttach>>,
         /// What [`SessionHost::shell_facts`] answers, per session.
         facts: HashMap<SessionRef, crate::autotitle::PaneFacts>,
     }
@@ -664,6 +690,16 @@ pub mod fake {
         /// The session record, when the session exists.
         pub fn session(&self, s: &SessionRef) -> Option<FakeSession> {
             self.st().sessions.get(s).cloned()
+        }
+
+        /// The raw bytes typed into the session's latest attach stream
+        /// (`flow.input`).
+        pub fn typed(&self, s: &SessionRef) -> Vec<u8> {
+            self.st()
+                .attaches
+                .get(s)
+                .map(|a| a.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone())
+                .unwrap_or_default()
         }
 
         /// The session's process ends this way; the session stays (remain-on-exit).
@@ -767,10 +803,22 @@ pub mod fake {
         }
 
         fn can_prewarm(&self) -> bool {
-            self.kind == HostKind::Tmux
+            true
+        }
+
+        /// Like the real hosts: a `pty` spare waits under its own id.
+        fn spare_name(&self, id: &str) -> String {
+            if self.kind == HostKind::Pty {
+                id.to_string()
+            } else {
+                crate::prewarm::spare_name(id)
+            }
         }
 
         fn rename(&self, s: &SessionRef, to: &str) -> Result<()> {
+            if s.name == to {
+                return Ok(());
+            }
             self.log(format!("rename {} {to}", s.name));
             let mut st = self.st();
             let to = SessionRef::new(s.socket.clone(), to.to_string());
@@ -841,7 +889,9 @@ pub mod fake {
         fn attach(&self, s: &SessionRef, cols: u16, rows: u16, _on_output: OnOutput) -> Result<Arc<dyn AttachStream>> {
             self.with(s, |f| f.size = (cols, rows))?;
             self.log(format!("attach {} {cols}x{rows}", s.name));
-            Ok(Arc::new(FakeAttach::default()))
+            let stream = Arc::new(FakeAttach::default());
+            self.st().attaches.insert(s.clone(), stream.clone());
+            Ok(stream)
         }
 
         fn process_start(&self, pid: u32) -> Option<i64> {
@@ -957,11 +1007,13 @@ mod tests {
 
     #[test]
     fn host_kind_parses_the_env_and_column_spellings() {
-        assert_eq!(HostKind::from_env_value(None), HostKind::Tmux, "default: tmux");
-        assert_eq!(HostKind::from_env_value(Some("")), HostKind::Tmux);
+        assert_eq!(HostKind::from_env_value(None), HostKind::Pty, "default: pty (SMOODEV-4238)");
+        assert_eq!(HostKind::from_env_value(Some("")), HostKind::Pty);
         assert_eq!(HostKind::from_env_value(Some(" PTY ")), HostKind::Pty);
-        assert_eq!(HostKind::from_env_value(Some("tmux")), HostKind::Tmux);
-        assert_eq!(HostKind::from_env_value(Some("zellij")), HostKind::Tmux, "unknown: tmux, not fatal");
+        assert_eq!(HostKind::from_env_value(Some("tmux")), HostKind::Tmux, "the opt-out");
+        assert_eq!(HostKind::from_env_value(Some(" TMUX ")), HostKind::Tmux);
+        assert_eq!(HostKind::from_env_value(Some("zellij")), HostKind::Pty, "unknown: the default, not fatal");
+        assert_eq!(HostKind::default(), HostKind::Tmux, "a row with no host column is a tmux row");
         assert_eq!(HostKind::parse("pty"), Some(HostKind::Pty));
         assert_eq!(HostKind::parse("nope"), None);
         for k in [HostKind::Tmux, HostKind::Pty] {

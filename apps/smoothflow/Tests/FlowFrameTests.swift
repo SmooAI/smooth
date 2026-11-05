@@ -1,3 +1,4 @@
+import GhosttyKit
 import XCTest
 @testable import SmoothFlow
 
@@ -49,6 +50,22 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertEqual(h[2].health?.fix, "uv tool install aider-chat")
         XCTAssertNil(h[3].health, "no verdict until the daemon's first pass")
         XCTAssertFalse(h[3].isDegraded)
+    }
+
+    /// SMOODEV-4238: a `pty` session's host answers terminal queries, so its
+    /// surface mirrors (libghostty's own answers are suppressed). A row from an
+    /// older engine has no `host` and is tmux: the surface answers, as before.
+    func testSessionHostDecidesWhoAnswersTerminalQueries() throws {
+        guard case let .session(pty) = try decode(#"{"type":"flow.session","session":{"id":"fs-1","state":"idle","host":"pty"}}"#) else { return XCTFail() }
+        XCTAssertEqual(pty.host, "pty")
+        XCTAssertTrue(pty.hostAnswersQueries)
+        guard case let .session(tmux) = try decode(#"{"type":"flow.session","session":{"id":"fs-2","state":"idle","host":"tmux"}}"#) else { return XCTFail() }
+        XCTAssertFalse(tmux.hostAnswersQueries)
+        guard case let .session(old) = try decode(#"{"type":"flow.session","session":{"id":"fs-3","state":"idle"}}"#) else { return XCTFail() }
+        XCTAssertNil(old.host)
+        XCTAssertFalse(old.hostAnswersQueries)
+        XCTAssertEqual(TerminalSurfaceView.ioMode(mirrorsReplies: true), GHOSTTY_SURFACE_IO_MANUAL_MIRROR)
+        XCTAssertEqual(TerminalSurfaceView.ioMode(mirrorsReplies: false), GHOSTTY_SURFACE_IO_MANUAL)
     }
 
     func testSessionWithAttentionAndArgvAsJsonText() throws {

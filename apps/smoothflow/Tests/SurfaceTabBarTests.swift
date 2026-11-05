@@ -48,10 +48,29 @@ final class SurfaceTabBarTests: XCTestCase {
         bar.layoutSubtreeIfNeeded()
         let second = try XCTUnwrap(bar.cell(at: 1))
         let mid = second.convert(NSPoint(x: second.bounds.midX, y: second.bounds.midY), to: nil)
-        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .otherMouseUp, location: mid, modifierFlags: [], timestamp: 0,
-                                                    windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
-        XCTAssertEqual(event.buttonNumber, 2, "AppKit's synthesized other-button event is the middle button")
+        // `NSEvent.mouseEvent` always says button 0; only a CGEvent carries
+        // the middle button. With no window, the location stays as given.
+        let cg = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: .otherMouseUp, mouseCursorPosition: mid, mouseButton: .center))
+        let event = try XCTUnwrap(NSEvent(cgEvent: cg))
+        XCTAssertEqual(event.buttonNumber, 2)
         bar.otherMouseUp(with: event)
         XCTAssertEqual(closed, [1])
+    }
+
+    /// A tree first applied while it has no size (launch, a restored tab's
+    /// first show) keeps its saved division instead of the split view's default.
+    func testATreeBuiltBeforeItHasASizeStillGetsItsFractions() throws {
+        let a = PaneID.next(), b = PaneID.next()
+        let root = PaneNode.split(horizontal: true, first: .leaf(a), second: .leaf(b), fraction: 0.25)
+        let tree = PaneTreeView()
+        var written: [Double] = []
+        tree.onFractionChanged = { f, _, _ in written.append(f) }
+        tree.apply(root: root, focused: a, zoomed: nil)
+        XCTAssertEqual(tree.bounds.width, 0)
+        tree.frame = NSRect(x: 0, y: 0, width: 800, height: 400)
+        tree.layoutSubtreeIfNeeded()
+        let split = try XCTUnwrap(tree.subviews.first as? NSSplitView)
+        XCTAssertEqual(split.arrangedSubviews[0].frame.width, 200, accuracy: 2)
+        XCTAssertEqual(written.last ?? 0.25, 0.25, accuracy: 0.01, "the split view's default never outlives the saved fraction: \(written)")
     }
 }

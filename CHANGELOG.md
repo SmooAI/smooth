@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.90.0
+
+### Minor Changes
+
+- b112dd0: SMOODEV-4260: `th chrome browse groups` lists every Chrome tab group, Claude in Chrome's included, with its tab count and when it was last used. `groups close` and `groups ungroup` clean them up by id, `--title` glob, `--idle 2h` or `--all`, with `--dry-run`. A group holding a window's active tab is never touched. Also `groups rename`, `color`, `collapse` and `expand`, and a `browse_groups` MCP tool. The extension is now 0.2.0: run `th chrome install` and reload it.
+
+## 0.89.1
+
+### Patch Changes
+
+- c8889b3: SMOODEV-4148: Claude Haiku 5.5 now runs through the `llm.smoo.ai` gateway like every other model, and the in-daemon direct Anthropic router is removed. Haiku is in the published model catalog for the web picker and the phone apps, and `th code` offers it on the gateway provider. A `providers.json` that still has the Coding slot on the Anthropic provider for Haiku is sent to the gateway.
+
 ## 0.89.0
 
 ### Minor Changes

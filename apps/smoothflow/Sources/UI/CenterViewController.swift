@@ -24,8 +24,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     /// The active tab's tree.
     private var treeView: PaneTreeView { tree(for: activeTab?.id ?? 0) }
     private let surfaceArea = NSStackView()
-    private var surfaceTabs: [SurfaceTab] = []
-    private var activeTabIndex = 0
+    private var surfaceTabs: [SurfaceTab] = [] { didSet { layoutChanged() } }
+    private var activeTabIndex = 0 { didSet { layoutChanged() } }
     private var nextTabId = 1
     /// th-26f5b9: the native review viewer (engine-computed structured diffs).
     private(set) lazy var diffView = DiffView(app: app)
@@ -178,8 +178,49 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         tabBar.onSelect = { [weak self] i in TabLatency.measure("click tab") { self?.selectTab(i) } }
         tabBar.onClose = { [weak self] i in TabLatency.measure("click close") { self?.closeTab(at: i) } }
         tabBar.onNew = { [weak self] in TabLatency.measure("click new") { self?.newTab() } }
-        surfaceTabs = [SurfaceTab(id: nextTabId, pane: PaneID.next())]
-        nextTabId += 1
+        if let saved = LayoutPersistence.load(), let restored = saved.restore(firstTabId: nextTabId) {
+            // SMOODEV-4238: every tab and split comes back where it was; the
+            // panes fill as the engine's hello names their sessions.
+            surfaceTabs = restored.tabs
+            activeTabIndex = restored.active
+            nextTabId += restored.tabs.count
+            awaitingSessions = saved.sessionIds
+        } else {
+            surfaceTabs = [SurfaceTab(id: nextTabId, pane: PaneID.next())]
+            nextTabId += 1
+        }
+        renderTabs()
+    }
+
+    // MARK: layout persistence (SMOODEV-4238)
+
+    /// Sessions a restored pane shows that the engine has not named yet.
+    private var awaitingSessions: Set<String> = []
+    private var pendingSave: DispatchWorkItem?
+
+    /// The tabs changed: write them out soon, coalescing a burst of edits.
+    private func layoutChanged() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveLayout() }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Write the layout now (quit runs this so the last edit is never lost).
+    func saveLayout() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        guard !surfaceTabs.isEmpty else { return }
+        LayoutPersistence.save(SavedLayout(surfaceTabs, active: activeTabIndex))
+    }
+
+    /// The fleet changed: a restored pane whose session just arrived gets its
+    /// surface. Nothing to do once every restored session has been seen.
+    func sessionsChanged() {
+        guard !awaitingSessions.isEmpty else { return }
+        let arrived = awaitingSessions.filter { app.store.sessions[$0] != nil }
+        guard !arrived.isEmpty else { return }
+        awaitingSessions.subtract(arrived)
         renderTabs()
     }
 
@@ -195,6 +236,9 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         }
         v.translatesAutoresizingMaskIntoConstraints = false
         treeArea.addSubview(v)
+        // Start at the area's size: the first `apply` builds its split views
+        // and pushes the model's fractions, which needs a size to divide.
+        v.frame = treeArea.bounds
         NSLayoutConstraint.activate([
             v.leadingAnchor.constraint(equalTo: treeArea.leadingAnchor), v.trailingAnchor.constraint(equalTo: treeArea.trailingAnchor),
             v.topAnchor.constraint(equalTo: treeArea.topAnchor), v.bottomAnchor.constraint(equalTo: treeArea.bottomAnchor),

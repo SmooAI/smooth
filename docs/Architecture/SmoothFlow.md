@@ -5,8 +5,9 @@
 > against; change it only by agreement with the engine lane.
 
 SmoothFlow is Big Smooth's session manager: agents (Claude Code, Codex,
-OpenCode) and plain shells run under one long-lived tmux server (or, with
-`SMOOTH_FLOW_HOST=pty`, each under its own session host process; see
+OpenCode) and plain shells each run under their own session host process
+(the `pty` host, the default since SMOODEV-4238 / ADR-014; older rows, and
+`SMOOTH_FLOW_HOST=tmux`, run under one long-lived tmux server; see
 [Process model](#process-model)), their PTY bytes stream to whichever surface is looking (desktop, `th flow attach`, a
 phone), harness hooks drive their state, and a supervision tick keeps them
 alive across crashes and usage limits. The engine — the `smooth-flow` crate,
@@ -138,8 +139,9 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine ─
                            └── zsh -l
 ```
 
-- **Selection.** `SMOOTH_FLOW_HOST=pty|tmux` (default `tmux`) picks the host
-  for NEW sessions; `EngineConfig::new_host` is the same knob in code. The
+- **Selection.** `SMOOTH_FLOW_HOST=pty|tmux` picks the host for NEW
+  sessions. Unset, empty or unknown means `pty` (`HostKind::NEW_SESSION_DEFAULT`,
+  ADR-014); a row with no `host` column still reads as tmux; `EngineConfig::new_host` is the same knob in code. The
   row's `host` column records where it runs, and a row is always driven by
   the host it was launched on: live tmux sessions finish on tmux after the
   env flips, and a resume relaunches on the row's host. A daemon without the
@@ -186,6 +188,14 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine ─
   (SIGTERM to the child's process group, SIGKILL after the grace) and waits
   for its `exit`.
 - **Replays** are what this host adds to attach: see [Replay](#replay).
+- **Quitting the app keeps the session (ADR-014).** A host is its own
+  `setsid` process, so the app's process-group kill on quit doesn't reach it,
+  and the engine never stops a `pty` host on shutdown. The relaunched daemon
+  re-adopts it. The app's `kill-server` on quit applies only to its tmux
+  server, which holds rows from before the default flipped. A host that
+  outlives the app loses the app's TCC attribution
+  ([SmoothFlow macOS § TCC](SmoothFlow-macOS.md#tcc-matrix-measured-2026-09-07-macos-264-developer-id-signed-ad-hoc-equivalent-build));
+  restarting the session from the app gives it back.
 
 ### The session host seam (th-64d4ab) {#session-host}
 
@@ -444,7 +454,14 @@ the bridge:
 7. **Terminal queries are answered by the host.** On the `pty` host the
    session's headless VT answers device-attribute and status queries (DA,
    DSR, …): the host writes `Vt::take_replies` back to the PTY. Clients
-   therefore must not answer them too (see Client rules).
+   therefore must not answer them too (see Client rules). Clients in the
+   field still do, so `Engine::input` drops a `pty` session's `flow.input`
+   frame when the whole frame is replies (`replies::is_reply_only`,
+   SMOODEV-4238). A terminal writes each answer as its own write, so typed
+   bytes never share a frame with one. Only sequences a keyboard, mouse or
+   paste never produce count; a cursor report on row 1, columns 2–16, is a
+   modified F3 too and passes. The Mac app mirrors instead
+   (`GHOSTTY_SURFACE_IO_MANUAL_MIRROR` on a `pty` surface).
 
 ### Client rules
 
@@ -846,6 +863,12 @@ is a **per-launch hook token** (`smooth_flow::hook_auth`):
   session.
 - A token dies with its launch. A relaunch rotates it, and `kill`, death and
   `close` revoke it (clearing the hash and deleting the file).
+- `/clear` (and `/new`) start a new harness session in the same process: a
+  token-authenticated `SessionStart` whose payload `source` is `clear` or `new`,
+  from the row's own harness kind, rebinds the row's `agent_session_id` to the
+  new id (th-0937a1), so a resume reopens the conversation the user is in. Any
+  other `SessionStart` with a new id (`startup` from a nested harness, `resume`,
+  `compact`) is refused as before.
 
 **Why per-session and not one daemon-wide token.** A daemon-wide secret in
 every agent's environment would let any agent speak for every other
@@ -944,12 +967,16 @@ the row is re-broadcast if a pearl turns up.
 **Pre-warmed shells** (`smooth_flow::prewarm`). A login shell takes 0.4–0.7 s
 to reach its first prompt, and nothing in the engine can shorten that. So the
 engine keeps up to three spare shells already sitting at a prompt, one per
-directory, under tmux sessions named `flowspare-<id>`. A spare has no row, so
-it never shows up in `flow.hello`, `th flow ls` or on a phone.
+directory, on the host new sessions launch on. A spare has no row, so it
+never shows up in `flow.hello`, `th flow ls` or on a phone.
 
-- **Claiming.** A new shell in a directory that has a spare claims it. tmux
-  renames the spare to the id it was launched with, and the row is created
-  under that id. The id matters because the exit wrapper already knows it.
+- **Claiming.** A new shell in a directory that has a spare claims it, and
+  the row is created under the id the spare was launched with (the exit
+  wrapper and the `pty` host's record already know it).
+    - On tmux the spare waits as `flowspare-<id>` and is renamed to `<id>`.
+    - A `pty` host can't be renamed (its socket and record are named by the
+      id), so its spare is launched under `<id>` itself and the claim renames
+      nothing (`SessionHost::spare_name`, SMOODEV-4238).
 - **When a spare starts:**
     - after every new shell, for its directory;
     - on `flow.prewarm {worktree? | cwd_of?}`, a hint with no reply. SmoothFlow
@@ -958,7 +985,10 @@ it never shows up in `flow.hello`, `th flow ls` or on a phone.
 - **Discarded instead of claimed:** a spare that died, or one older than 30
   minutes.
 - **Cleanup.** The daemon kills its spares on shutdown and reaps any that an
-  earlier daemon left behind when it starts.
+  earlier daemon left behind when it starts. tmux spares are found by their
+  prefix. A `pty` spare looks like any session, so waiting spare ids are
+  recorded in `flow.db` (`config` key `prewarm_spares:<owner>`), and a start
+  reaps the recorded ids that have no row.
 - **Turning it off.** `SMOOTH_FLOW_PREWARM=0` disables it. Tests and scratch
   engines never pre-warm, since only `flow_route::install` calls
   `Engine::enable_prewarm`.
@@ -973,7 +1003,10 @@ zsh + starship, this repo):
 | ⌘N → prompt on screen     | 657–824 ms      | **50–92 ms**       | 563–618 ms      |
 
 **Live tab names** (`smooth_flow::autotitle`). A shell's `title` follows what
-is happening in it, the way cmux and Ghostty name a tab:
+is happening in it, the way cmux and Ghostty name a tab. tmux reads the facts
+off the pane. On the `pty` host (SMOODEV-4238) they come from the terminal's
+foreground job (`ps -o tpgid=`), the shell's directory (the process table, no
+fork) and the VT's OSC title. The rules:
 
 1. At the prompt, the name is the directory: its folder name, `~` for home,
    `/` for the root.
@@ -1122,7 +1155,11 @@ same brand-new harness session into two rows.
    start time.
 2. Unexpected death (non-zero exit, or the tmux session gone while state ≠
    done) ⇒ relaunch with `claude --resume <id>` up to 3 times with 5 s · 2ⁿ
-   backoff, then `dead` with attention `crashed`. Shells never resume.
+   backoff, then `dead` with attention `crashed`. Shells never resume. An
+   agent whose relaunch would be its original argv with the prompt in it (no
+   harness session id, and its manifest neither continues the latest
+   conversation nor pastes the prompt) is never relaunched: `needs_you`, attention
+   `restorable` (see [Restore](#restore)).
 3. Usage limit ⇒ schedule, not give up: parse the reset time
    (`limit::parse_reset_at` — "resets at 4pm", "in 45 minutes"; fallback 1 h),
    set `limited` + `resume_at`, and when the tick passes it send Enter (or
@@ -1137,6 +1174,49 @@ same brand-new harness session into two rows.
 6. Engine, tmux server and agents are spawned by the app (or its LaunchAgent)
    so TCC grants attribute to it. `th flow` connects; it never launches the
    daemon.
+7. Interrupted is not crashed: see [Restore](#restore).
+
+### Restore after an interruption (th-0937a1) {#restore}
+
+Quitting the SmoothFlow app kills its tmux server (`tmuxOwnedByApp`, the
+default), and a reboot kills everything, so a live row can come back with no
+process behind it for a reason that is not a crash. The engine tells the two
+apart on its **first supervision pass** (`smooth_flow::restore`):
+
+- Every launch records the machine's boot in the row's `boot_id` column
+  (macOS `kern.bootsessionuuid`, else `kern.boottime`; Linux
+  `/proc/sys/kernel/random/boot_id`). It stays off the wire.
+- `Engine::shutdown` (the daemon calls it on SIGTERM/Ctrl-C) writes a
+  clean-quit marker, `config` key `clean_quit:<owner socket>`. Two daemons
+  share one `flow.db`, so each reads only its own. The app stops its daemon
+  before it kills the tmux server, so the marker is written while the fleet is
+  still up. The first pass consumes it.
+- A live row of ours whose host session is gone is **interrupted** when its
+  `boot_id` is not this boot, or when the marker was there. Anything else
+  (same boot, no marker, or a row from before `boot_id`) is a crash, as
+  before.
+
+An interrupted agent whose conversation can be resumed (a `resume_session`
+manifest with a harness session id, or `continue_latest`) goes `starting` with
+attention `restoring` and is resumed through the manifest's `[resume]` argv,
+300 ms apart, without counting against rule 2's three resumes. This covers
+`pty` rows too, which a lone vanish reads as unknown and never resumes.
+Without a way to continue the conversation the row goes `needs_you` with
+attention `restorable` (supervision leaves it parked): relaunching the original argv would send its prompt again, so
+that is the user's call (`kill --resume`).
+
+An interrupted **shell** is reopened the same way, staggered with the agents,
+in the directory it was last in (SMOODEV-4238, attention detail "reopening in
+<dir>"). The engine samples every live shell's directory every 15 s
+(`SHELL_CWD_EVERY`) and once more in `Engine::shutdown`, into the row's
+`last_cwd` column (off the wire, like `boot_id`). tmux rows use
+`pane_current_path`; `pty` rows use one read of the process table for all of
+them. A directory that no longer exists falls back to the worktree. A shell
+that died with nothing saying it was interrupted still dies, as before.
+
+On the `pty` host, quitting the app leaves the sessions running (ADR-014), so
+after a quit they are re-adopted live and none of this runs. It is what brings
+them back after a reboot, and what brings tmux rows back after a quit.
 
 ## Fan-out
 

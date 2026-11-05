@@ -2,11 +2,13 @@
 //!
 //! A shell tab is named the way cmux and Ghostty name one: by the program
 //! running in it, else by the directory it sits in. cmux gets that from the
-//! terminal title its shell integration sets; SmoothFlow's shells run under
-//! tmux on the engine side, so the engine reads the same facts off the pane
-//! (`#{pane_current_command}`, `#{pane_current_path}`, `#{pane_title}`) on
-//! its supervision tick and writes the result to the row's `title` — which
-//! is how the Mac app, the phones and `th flow ls` all see one name. A title
+//! terminal title its shell integration sets; SmoothFlow's shells run on the
+//! engine side, so the engine reads the same facts off the session on its
+//! supervision tick: tmux's `#{pane_current_command}`, `#{pane_current_path}`
+//! and `#{pane_title}`, or on the `pty` host the terminal's foreground job,
+//! the shell's directory and the VT's title (SMOODEV-4238). It writes the
+//! result to the row's `title`, which is how the Mac app, the phones and
+//! `th flow ls` all see one name. A title
 //! someone gave the session (`flow.rename`, `title_pinned`) is never
 //! overwritten.
 //!

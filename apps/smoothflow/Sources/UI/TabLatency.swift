@@ -26,7 +26,7 @@ enum TabLatency {
         }
     }
 
-    static func ms(_ seconds: TimeInterval) -> String { String(format: "%.1f", seconds * 1000) }
+    nonisolated static func ms(_ seconds: TimeInterval) -> String { String(format: "%.1f", seconds * 1000) }
 
     /// Per-stage times inside one render.
     struct Stages {

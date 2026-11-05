@@ -4,8 +4,8 @@ import AppKit
 ///
 /// The hierarchy is rebuilt whenever the tree changes shape, but the
 /// `SessionPane` views are not: they are kept by `PaneID` and re-parented, so
-/// the terminal surface inside one survives a split, a close, a zoom and a tab
-/// switch. Only the fractions travel back out — a dragged divider writes to the
+/// the terminal surface inside one survives a split, a close and a zoom. A tab
+/// switch touches none of it: each tab has its own tree. Only the fractions travel back out — a dragged divider writes to the
 /// model without a rebuild, or the drag would fight the relayout.
 @MainActor
 final class PaneTreeView: NSView, NSSplitViewDelegate {
@@ -21,6 +21,10 @@ final class PaneTreeView: NSView, NSSplitViewDelegate {
     /// Each generated split view, with the pair of panes its divider separates.
     private var splits: [ObjectIdentifier: (first: PaneID, second: PaneID)] = [:]
     private var applyingLayout = false
+    /// A tree built before this view had a size (launch, or a tab's first
+    /// show): its fractions wait for `layout`, and until then the split views'
+    /// default division must not be written back over the saved one.
+    private var fractionsWaitingForSize: PaneNode?
 
     /// The live pane view for `id`, created on demand. Callers host session
     /// surfaces in it.
@@ -41,6 +45,7 @@ final class PaneTreeView: NSView, NSSplitViewDelegate {
             shape = effective.skeleton
             rebuild(effective)
         } else if redividing, let v = subviews.first {
+            fractionsWaitingForSize = nil
             applyingLayout = true
             applyFractions(effective, in: v)
             applyingLayout = false
@@ -63,6 +68,21 @@ final class PaneTreeView: NSView, NSSplitViewDelegate {
             v.topAnchor.constraint(equalTo: topAnchor), v.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         layoutSubtreeIfNeeded()
+        if bounds.width > 1, bounds.height > 1 {
+            fractionsWaitingForSize = nil
+            applyFractions(node, in: v)
+        } else {
+            fractionsWaitingForSize = node
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        guard let node = fractionsWaitingForSize, bounds.width > 1, bounds.height > 1, let v = subviews.first else { return }
+        fractionsWaitingForSize = nil
+        applyingLayout = true
+        defer { applyingLayout = false }
+        v.layoutSubtreeIfNeeded()
         applyFractions(node, in: v)
     }
 
@@ -99,7 +119,7 @@ final class PaneTreeView: NSView, NSSplitViewDelegate {
     // MARK: NSSplitViewDelegate
 
     func splitViewDidResizeSubviews(_ notification: Notification) {
-        guard !applyingLayout,
+        guard !applyingLayout, fractionsWaitingForSize == nil,
               let sv = notification.object as? NSSplitView,
               let pair = splits[ObjectIdentifier(sv)],
               sv.arrangedSubviews.count == 2 else { return }

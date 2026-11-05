@@ -388,6 +388,54 @@ pub struct UploadArgs {
     pub instance: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GroupsArgs {
+    /// list (default), close (closes the groups' tabs) or ungroup (keeps the tabs).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Group ids from list.
+    #[serde(default)]
+    pub ids: Vec<i64>,
+    /// Groups whose title matches: exact, or a glob with * and ? (case-insensitive).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Only groups whose every tab was last used longer ago than this: 30m, 2h, 1d. Alone, it considers every group.
+    #[serde(default)]
+    pub idle: Option<String>,
+    /// Every group.
+    #[serde(default)]
+    pub all: bool,
+    /// Must be true to close/ungroup; otherwise you get a dry run.
+    #[serde(default)]
+    pub confirm: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+/// browse_groups: list, or a close/ungroup that dry-runs unless confirmed.
+fn groups_op(a: &GroupsArgs) -> anyhow::Result<String> {
+    let inst = a.instance.as_deref();
+    match a.action.as_deref().unwrap_or("list") {
+        "list" => chrome::groups::list(inst, false),
+        action @ ("close" | "ungroup") => {
+            let sel = chrome::groups::Selector {
+                ids: a.ids.clone(),
+                title: a.title.clone(),
+                idle: a.idle.clone(),
+                all: a.all,
+                ..Default::default()
+            };
+            let out = chrome::groups::apply(inst, action, &sel, !a.confirm, false)?;
+            Ok(if a.confirm {
+                out
+            } else {
+                out + "Re-run with confirm=true once the user agrees."
+            })
+        }
+        other => anyhow::bail!("action must be list, close or ungroup, not {other}"),
+    }
+}
+
 /// A click/hover's args: its target, `trusted` when asked for (x/y imply it in the extension).
 fn pointer_args(a: &ClickArgs) -> anyhow::Result<serde_json::Value> {
     let mut args = chrome::point_target(a.r#ref.as_deref(), a.x, a.y, true)?;
@@ -502,6 +550,15 @@ impl SmoothMcp {
     pub async fn browse_tabs(&self, params: Parameters<InstanceArgs>) -> Result<String, ErrorData> {
         let a = params.0;
         blocking(move || chrome::tabs(a.instance.as_deref())).await
+    }
+
+    #[tool(
+        name = "browse_groups",
+        description = "Chrome tab groups in every window, Claude in Chrome's included: list them (id, title, color, tabs, last used, whether in use), or close/ungroup them by ids, title glob, idle time (\"2h\") or all. Groups holding a window's active tab are never touched, and idle spares recently used ones. close/ungroup return a dry run unless confirm=true; confirm only after the user agreed."
+    )]
+    pub async fn browse_groups(&self, params: Parameters<GroupsArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || groups_op(&a)).await
     }
 
     #[tool(
@@ -713,5 +770,36 @@ impl SmoothMcp {
             chrome::upload(a.instance.as_deref(), a.tab, a.r#ref.as_deref(), &paths)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test idiom")]
+mod tests {
+    use super::*;
+
+    fn args(v: serde_json::Value) -> GroupsArgs {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn groups_args_default_to_a_list() {
+        let a = args(json!({}));
+        assert!(a.action.is_none() && a.ids.is_empty() && !a.all && !a.confirm);
+        let a = args(json!({"action": "close", "ids": [4], "title": "Claude*", "idle": "2h", "confirm": true}));
+        assert_eq!(
+            (a.action.as_deref(), a.ids, a.title.as_deref(), a.idle.as_deref(), a.confirm),
+            (Some("close"), vec![4], Some("Claude*"), Some("2h"), true)
+        );
+    }
+
+    #[test]
+    fn groups_reject_bad_input_before_reaching_chrome() {
+        let err = groups_op(&args(json!({"action": "nuke"}))).unwrap_err().to_string();
+        assert!(err.contains("list, close or ungroup"), "{err}");
+        let err = groups_op(&args(json!({"action": "close"}))).unwrap_err().to_string();
+        assert!(err.contains("say which groups"), "{err}");
+        let err = groups_op(&args(json!({"action": "ungroup", "idle": "later"}))).unwrap_err().to_string();
+        assert!(err.contains("isn't a duration"), "{err}");
     }
 }

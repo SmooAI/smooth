@@ -59,12 +59,12 @@ thiserror.workspace = true
 # th-e4aef9: the session host (behind `pty-host`): setsid, umask, the peer's
 # uid on its socket, waitpid for the child's exact status, killpg for a tree
 # kill — all safe wrappers, since the workspace forbids `unsafe`.
+# th-64d4ab: process liveness and start time without `ps` on Windows;
+# SMOODEV-4238: a process's working directory without forking `lsof`.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "socket", "user"], optional = true }
-
-[target.'cfg(windows)'.dependencies]
-# th-64d4ab: process liveness and start time without `ps`.
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [features]
 # th-5025fb: the engine-owned PTY session host (ADR-011) and `PtyHost`
