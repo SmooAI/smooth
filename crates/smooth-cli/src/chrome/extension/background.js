@@ -1,4 +1,4 @@
-importScripts('cdp.js');
+importScripts('cdp.js', 'groups.js');
 
 const HOST = 'ai.smoo.smooth_chrome';
 const BROWSING = { permissions: ['tabs', 'scripting', 'tabGroups'], origins: ['<all_urls>'] };
@@ -416,6 +416,11 @@ async function groupTab(tab) {
     } catch {
         // Cosmetic only.
     }
+}
+
+async function groupState() {
+    await needBrowsing();
+    return Promise.all([chrome.tabGroups.query({}), chrome.tabs.query({}), chrome.windows.getAll()]);
 }
 
 // Runs inside the page, in the extension's isolated world. It must be self-contained:
@@ -865,6 +870,28 @@ const METHODS = {
     'tabs.close': async ({ tabId }) => {
         await needBrowsing();
         await chrome.tabs.remove(tabId);
+    },
+    // Every tab group in every window, the Claude in Chrome ones included, not just Smooth's.
+    'groups.list': async () => SmoothGroups.summarize(...(await groupState())),
+    'groups.apply': async ({ action, ids, title, idleMs, all, dryRun }) => {
+        if (action !== 'close' && action !== 'ungroup') throw new Error('action must be close or ungroup');
+        const plan = SmoothGroups.select(SmoothGroups.summarize(...(await groupState())), { ids, title, idleMs, all });
+        const failed = [];
+        if (!dryRun) {
+            for (const g of plan.selected) {
+                try {
+                    await (action === 'close' ? chrome.tabs.remove(g.tabIds) : chrome.tabs.ungroup(g.tabIds));
+                } catch (e) {
+                    failed.push({ group: g, error: e?.message ?? String(e) });
+                }
+            }
+        }
+        const failedIds = new Set(failed.map((f) => f.group.id));
+        return { action, dryRun: !!dryRun, ...plan, selected: plan.selected.filter((g) => !failedIds.has(g.id)), failed };
+    },
+    'groups.update': async ({ groupId, title, color, collapsed }) => {
+        await needBrowsing();
+        return chrome.tabGroups.update(groupId, clean({ title, color, collapsed }));
     },
     'page.text': ({ tabId }) => inPage(tabId, 'text'),
     'page.snapshot': ({ tabId, limit }) => snapshot(tabId, limit),

@@ -30,7 +30,7 @@ th chrome bm … / MCP bookmarks_* ──┐
 | Manifest  | `…/Google/Chrome/NativeMessagingHosts/ai.smoo.smooth_chrome.json` | `allowed_origins` is limited to the pinned extension ID.                                                                                                                                                                                                                                                                               |
 | Logic     | `chrome/tree.rs`                                                  | Paths, upsert, managed guards and restore are written against an `Api` trait. The same code runs live, as a dry run (`MemTree`) and in tests.                                                                                                                                                                                          |
 | History   | `chrome/history.rs`                                               | A git repo at `~/.smooth/chrome/history` holding `bookmarks.json` and `bookmarks.html`.                                                                                                                                                                                                                                                |
-| MCP       | `mcp_chrome.rs`                                                   | 11 `bookmarks_*` and 20 `browse_*` tools on `th mcp serve`.                                                                                                                                                                                                                                                                            |
+| MCP       | `mcp_chrome.rs`                                                   | 11 `bookmarks_*` and 21 `browse_*` tools on `th mcp serve`.                                                                                                                                                                                                                                                                            |
 
 The extension's service worker connects to the host when it starts, on `onStartup` and on `onInstalled`. While that native port is open, Chrome keeps the worker alive. On disconnect it reconnects with exponential backoff, capped at 60s.
 
@@ -65,6 +65,26 @@ All page work is one self-contained function, `pageCall` in `background.js`, inj
 
 Screenshots use `captureVisibleTab`, which first activates the tab. `node scripts/chrome-page-smoke.mjs` runs `pageCall` against a fixture page in headless Chrome and checks every op.
 
+## Tab groups
+
+`chrome.tabGroups` and `chrome.tabs` see every group in the browser, not just the extension's own, so `th chrome browse groups` manages the groups other extensions leave behind (the stale **Claude** groups from Claude in Chrome, say). It needs Agent browsing on, like every `browse_*` command. SMOODEV-4260.
+
+```bash
+th chrome browse groups [--json]                          # id, tabs, last used, color, window, state, title
+th chrome browse groups close --title Claude --idle 2h --dry-run
+th chrome browse groups ungroup 1234 5678                 # keep the tabs, drop the grouping
+th chrome browse groups close --all --idle 1d
+th chrome browse groups rename|color|collapse|expand …
+```
+
+- **Last used** is the newest `tab.lastAccessed` among the group's tabs. **in use** means the group holds the active tab of the focused window.
+- **Selectors.** Group ids and `--title` add candidates. `--title` matches the whole title, case-insensitively, with `*` and `?` wildcards; an empty title matches untitled groups. `--all`, or `--idle` alone, takes every group. `--idle 30m|2h|1d|1h30m` then keeps only groups whose every tab was last used at least that long ago. At least one selector is required.
+- **Safety.** A group holding the active tab of any window is never closed or ungrouped. With `--idle`, a group used more recently, or one Chrome reports no last-used time for, is left alone. The output lists what was left alone and why, ids that matched no group, and any group Chrome refused.
+- `close` closes the member tabs; `ungroup` keeps them. `--dry-run` (MCP: no `confirm`) prints the plan and changes nothing.
+- **Where the logic lives.** Selection and the safety rules are the pure `SmoothGroups.select` in `extension/groups.js`, run inside the extension against the live browser at the moment it acts (`groups.apply`), so a stale list can't close a group that just became active. `chrome/groups.rs` parses selectors and durations and formats the result. `node scripts/chrome-groups-smoke.mjs` tests the rules; `chrome-sw-smoke.mjs` drives `groups.list`, `groups.apply` and `groups.update` against a stub `chrome`.
+- **MCP.** `browse_groups` takes `action` (`list`, `close`, `ungroup`), `ids`, `title`, `idle`, `all` and `confirm`. It is a write tool, so the read-only MCP gate hides it, list included.
+- An extension older than 0.2.0 answers "unknown method"; `th` says to run `th chrome install` and reload it.
+
 ## Trusted input (opt-in)
 
 Trusted input is off by default and turned on with the popup's **Trusted input** switch, which is only available once browsing is on. While attached, Chrome shows its "Smooth started debugging this browser" bar.
@@ -96,6 +116,7 @@ The builders live in `extension/cdp.js` (pure functions, no `chrome.*`). `node s
 | `read_network_requests`                                       | `browse_network`                                                             |
 | `file_upload`                                                 | `browse_upload`                                                              |
 | —                                                             | `browse_dialog`, `browse_wait_for` (Claude in Chrome has no equivalent tool) |
+| —                                                             | `browse_groups`                                                              |
 | `resize_window`, `gif_creator`, `upload_image`, `shortcuts_*` | Not done                                                                     |
 
 ## Popup
