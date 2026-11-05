@@ -68,6 +68,9 @@ enum AttentionNotifier {
         case .held:
             guard settings.held else { return nil }
             return AttentionNotification(sessionId: session.id, title: "\(name) is held by another process", body: a.detail ?? "pid \(a.pid.map(String.init) ?? "?")", category: categoryGeneric)
+        case .restorable:
+            guard settings.crashed else { return nil }
+            return AttentionNotification(sessionId: session.id, title: "\(name) is waiting to be resumed", body: a.detail ?? "", category: categoryGeneric)
         case .unknown:
             return nil
         }

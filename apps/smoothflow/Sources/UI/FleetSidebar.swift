@@ -92,6 +92,15 @@ struct FleetSidebar: View {
                 }
             }
             Spacer()
+            if let remote = s.remote {
+                Label(remote.host, systemImage: "network")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2)
+                    .foregroundStyle(Color(Theme.muted))
+                    .lineLimit(1)
+                    .help("Over ssh to \(remote.label). \(RemoteTarget.survivalNote)")
+                    .accessibilityIdentifier("sidebar.remote.\(s.id)")
+            }
             if s.unread { UnreadBadge() }
         }
         .padding(.vertical, 2)
@@ -106,8 +115,11 @@ struct FleetSidebar: View {
         .contextMenu {
             Button("Open") { app.focus(s.id) }
             if s.isLive {
-                Button("Kill & Resume") { app.kill(s, resume: true) }
+                Button(s.remote == nil ? "Kill & Resume" : "Reconnect") { app.kill(s, resume: true) }
                 Button("Kill") { app.kill(s, resume: false) }
+            } else if let remote = s.remote {
+                // A finished row stays finished: this is a new session there.
+                Button("New Shell on \(remote.host)") { app.mainWindow?.center.newShell(on: remote) }
             }
             Divider()
             Button("Close Out…") { app.showCloseOut(s.id) }.accessibilityIdentifier("sidebar.closeOut.\(s.id)")

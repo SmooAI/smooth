@@ -4,17 +4,21 @@ import Foundation
 /// terminal: ⌘N and every split open a plain shell at once, and the only
 /// question is the directory — answered here, in this order:
 ///
+/// 0. a remote host the user just picked (SMOODEV-4269): no local directory;
 /// 1. a directory the user just picked (New Shell in Directory…);
 /// 2. the focused pane's session, by id: the engine asks tmux where its
 ///    shell is RIGHT NOW (`cwd_of`), so a `cd` inside the pane carries over
-///    and the session's launch worktree is only the engine's fallback;
+///    and the session's launch worktree is only the engine's fallback (a
+///    remote session's split stays on its host, in its starting directory);
 /// 3. the last directory the user opened, if it still exists;
 /// 4. `$HOME`.
 enum ShellLaunch {
-    static func request(source: Session?, picked: String? = nil, last: String?, home: String,
+    static func request(source: Session?, picked: String? = nil, remote: RemoteTarget? = nil, last: String?, home: String,
                         isDirectory: (String) -> Bool = ShellLaunch.isDirectory) -> NewSession {
         var n = NewSession(kind: "shell")
-        if let picked, !picked.isEmpty {
+        if let remote {
+            n.remote = remote
+        } else if let picked, !picked.isEmpty {
             n.worktree = picked
         } else if let source {
             n.cwdOf = source.id

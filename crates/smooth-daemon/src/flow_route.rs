@@ -260,6 +260,9 @@ struct NewBody {
     /// SMOODEV-4111: start in this session's live working directory.
     #[serde(default)]
     cwd_of: Option<String>,
+    /// SMOODEV-4269: run on this host over the system `ssh`.
+    #[serde(default)]
+    remote: Option<smooth_flow::RemoteTarget>,
     /// SMOODEV-4267: answer only once the session has launched, with a
     /// failure as an error (`th flow new`). By default the reply is the
     /// `starting` row, and a failure lands on it.
@@ -281,6 +284,7 @@ impl From<NewBody> for NewRequest {
             fan_out_id: None,
             tmux_socket: b.tmux_socket,
             cwd_of: b.cwd_of,
+            remote: b.remote,
         }
     }
 }
@@ -981,6 +985,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
             title,
             tmux_socket,
             cwd_of,
+            remote,
         } => {
             let req = NewRequest {
                 kind,
@@ -994,6 +999,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
                 fan_out_id: None,
                 tmux_socket,
                 cwd_of,
+                remote,
             };
             let s = run(engine, move |e| e.begin_session(req)).await?;
             Ok(vec![ServerFrame::Session { session: s }])
