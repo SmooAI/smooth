@@ -60,6 +60,24 @@ final class BrowserUITests: FlowUITestCase {
         XCTAssertEqual(barText, url)
     }
 
+    /// A click has to give the page the keyboard. The window turns down a page's
+    /// own requests for it, and this is the request it must not turn down: if it
+    /// did, the bar would keep the keyboard and the typing below would land there.
+    func testClickingThePageTakesTheKeyboardFromTheBar() {
+        selectSession()
+        let url = openPage()
+        app.typeKey("l", modifierFlags: .command)
+        app.typeText("x")
+        XCTAssertTrue(waitUntil { self.barText == "x" }, "⌘L puts the keyboard in the bar: \(barText)")
+        app.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil { self.barText == url }, "bar: \(barText)")
+        app.typeKey("l", modifierFlags: .command)
+        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 0, dy: 200)).click()
+        app.typeText("zz")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(barText, url, "the typing went to the page")
+    }
+
     func testCommandWClosesThePaneWithNoQuestion() {
         selectSession()
         _ = openPage()
