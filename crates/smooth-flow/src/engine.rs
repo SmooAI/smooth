@@ -8662,8 +8662,17 @@ quiet_ms = 300
         e.restore_interrupted().unwrap();
         let a = e.get(&agent.id).unwrap().unwrap();
         assert_eq!(a.attention.as_ref().unwrap().reason, RESTORABLE, "{a:?}");
+        // The restore thread relaunches at once and clears the note, so it may
+        // already be gone: check it only if it's still there, then wait for the
+        // outcome that matters.
         let sh = e.get(&shell.id).unwrap().unwrap();
-        assert!(sh.attention.unwrap().detail.unwrap().contains("reconnecting to box"));
+        if let Some(detail) = sh.attention.and_then(|att| att.detail) {
+            assert!(detail.contains("reconnecting to box"), "{detail}");
+        }
+        soon("the shell reconnects over ssh", || {
+            let s = e.get(&shell.id).unwrap().unwrap();
+            s.state == SessionState::Idle && host.session(&host_ref(&s)).is_some_and(|h| h.argv[0] == "ssh")
+        });
     }
 
     /// Kill & Resume on a live remote shell is a fresh `ssh`, and it ends ready.
