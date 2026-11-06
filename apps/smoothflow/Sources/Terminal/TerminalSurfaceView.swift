@@ -377,7 +377,9 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     var fallbackDirectory: (() -> String?)?
     private var linkLabel: NSTextField?
 
-    /// What a resolved link does. Tests replace it so nothing really opens.
+    /// What a resolved link does. Tests replace it so nothing really opens, and
+    /// the app points it at `AppController.performLink` so a web link can go to
+    /// a browser pane (SMOODEV-4270).
     var performLink: (TerminalLink.Target) -> Void = { TerminalLink.perform($0) }
 
     func openLink(_ raw: String) {

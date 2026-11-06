@@ -10,7 +10,9 @@ import Foundation
 /// The sessions themselves are the engine's business: a live one is still
 /// running (the `pty` host outlives the app), a dead agent is resumed through
 /// its harness, and a shell reopens in its last directory. A pane whose
-/// session the engine no longer knows comes back empty, never dropped.
+/// session the engine no longer knows comes back empty, never dropped. A
+/// browser pane keeps its URL (SMOODEV-4270), and only that: its history and
+/// its site data do not survive a relaunch.
 struct SavedLayout: Codable, Equatable {
     static let version = 1
 
@@ -47,12 +49,17 @@ struct SavedTab: Codable, Equatable {
     /// Leaf position → session id. Encoded with string keys so the JSON is an
     /// object, not Swift's alternating key/value array.
     var sessions: [String: String]
+    /// Leaf position → browser URL. Absent in a layout saved before browser
+    /// panes existed, and left out of the JSON when there are none, so `version`
+    /// stays 1: an older build reading this just shows those panes empty.
+    var browsers: [String: String]?
 
-    init(root: SavedNode, focused: Int, zoomed: Int? = nil, sessions: [Int: String] = [:]) {
+    init(root: SavedNode, focused: Int, zoomed: Int? = nil, sessions: [Int: String] = [:], browsers: [Int: String] = [:]) {
         self.root = root
         self.focused = focused
         self.zoomed = zoomed
         self.sessions = Dictionary(uniqueKeysWithValues: sessions.map { (String($0.key), $0.value) })
+        self.browsers = browsers.isEmpty ? nil : Dictionary(uniqueKeysWithValues: browsers.map { (String($0.key), $0.value) })
     }
 
     init(_ tab: SurfaceTab) {
@@ -62,7 +69,11 @@ struct SavedTab: Codable, Equatable {
         for (pane, sid) in tab.sessions {
             if let i = index(pane) { sessions[i] = sid }
         }
-        self.init(root: SavedNode(tab.root), focused: index(tab.focused) ?? 0, zoomed: tab.zoomed.flatMap(index), sessions: sessions)
+        var browsers: [Int: String] = [:]
+        for (pane, url) in tab.browsers {
+            if let i = index(pane) { browsers[i] = url }
+        }
+        self.init(root: SavedNode(tab.root), focused: index(tab.focused) ?? 0, zoomed: tab.zoomed.flatMap(index), sessions: sessions, browsers: browsers)
     }
 
     func restore(id: Int) -> SurfaceTab {
@@ -75,6 +86,13 @@ struct SavedTab: Codable, Equatable {
         tab.zoomed = zoomed.flatMap { ids.indices.contains($0) && leafCount > 1 ? ids[$0] : nil }
         for (key, sid) in sessions {
             if let i = Int(key), ids.indices.contains(i) { tab.sessions[ids[i]] = sid }
+        }
+        // The value is editable and a URL here gets loaded, so it passes the same
+        // gate as one typed in the bar. One that fails leaves the pane empty.
+        for (key, url) in browsers ?? [:] {
+            guard let i = Int(key), ids.indices.contains(i), let safe = BrowserURL.restored(url) else { continue }
+            tab.browsers[ids[i]] = safe
+            tab.sessions[ids[i]] = nil
         }
         return tab
     }
