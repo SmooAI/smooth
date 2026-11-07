@@ -7484,8 +7484,10 @@ quiet_ms = 300
         soon("the launch", || launched(&e, &s.id));
         let target = e.pane(&row(&e, &s.id)).unwrap();
         soon("what was typed arrives", || host.typed(&target) == b"hello");
-        let clients = e.lock_ptys().get(&s.id).map(|b| b.pty.clients().load(std::sync::atomic::Ordering::Relaxed));
-        assert_eq!(clients, Some(1), "two attached, one left");
+        // Typed input is delivered before the waiting clients attach, so the count can lag it.
+        soon("two attached, one left", || {
+            e.lock_ptys().get(&s.id).map(|b| b.pty.clients().load(std::sync::atomic::Ordering::Relaxed)) == Some(1)
+        });
         assert_eq!(row(&e, &s.id).state, SessionState::Starting, "launched is not ready");
     }
 
