@@ -461,6 +461,9 @@ struct Inner {
     boot_id: Option<String>,
     /// Set once the first supervision pass has restored interrupted rows.
     restored: std::sync::OnceLock<()>,
+    /// Held while an agent's row is created and marked as launching, so
+    /// [`Engine::launch_was_lost`] never sees a row between the two.
+    opening_row: Mutex<()>,
     /// Keep pre-warmed shells ([`Engine::enable_prewarm`]).
     prewarm: std::sync::atomic::AtomicBool,
 }
@@ -992,6 +995,7 @@ impl Engine {
                 }),
                 boot_id: crate::restore::current_boot_id(),
                 restored: std::sync::OnceLock::new(),
+                opening_row: Mutex::new(()),
                 prewarm: std::sync::atomic::AtomicBool::new(false),
             }),
         };
@@ -1947,6 +1951,7 @@ impl Engine {
             .then(|| default_title(&req.kind, req.prompt.as_deref(), req.pearl_id.as_deref(), None, &worktree));
         let title = req.title.clone().or_else(|| provisional_title.clone()).unwrap_or_default();
         let branch = make_worktree.as_ref().map(|(_, pearl, slug)| format!("{pearl}-{slug}"));
+        let opening_row = self.lock_opening_row();
         let session = self.with_store(|st| {
             st.create(NewSession {
                 kind: Some(req.kind.clone()),
@@ -1967,6 +1972,7 @@ impl Engine {
             })
         })?;
         self.rt().launching.insert(session.id.clone(), PendingOpen::default());
+        drop(opening_row);
         self.emit_session(&session);
         crate::timing::stage(&session.id, "row", t);
         let env = self.launch_env(Some(manifest), &session);
@@ -2159,6 +2165,7 @@ impl Engine {
         } else {
             (None, None, explicit.unwrap_or_default(), remote.label())
         };
+        let opening_row = self.lock_opening_row();
         let session = self.with_store(|st| {
             st.create(NewSession {
                 kind: Some(req.kind.clone()),
@@ -2174,7 +2181,16 @@ impl Engine {
                 ..Default::default()
             })
         })?;
-        let session = self.launch(&session, &argv, &[])?;
+        if session.kind.is_agent() {
+            self.rt().launching.insert(session.id.clone(), PendingOpen::default());
+        }
+        drop(opening_row);
+        let launched = self.launch(&session, &argv, &[]);
+        let pending = self.rt().launching.remove(&session.id);
+        let session = launched?;
+        if let Some(pending) = pending {
+            self.apply_pending(&session.id, &pending);
+        }
         if let Some(t) = req.title.as_deref() {
             self.with_store(|st| st.rename(&session.id, Some(t)))?;
             self.emit_session(&self.require(&session.id)?);
@@ -3953,6 +3969,21 @@ impl Engine {
         });
     }
 
+    fn lock_opening_row(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.inner.opening_row.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `id` has no process and nothing on its way to start one. Restore
+    /// runs alongside new sessions, so this rereads the row: its caller's copy
+    /// may predate a launch that has since finished.
+    fn launch_was_lost(&self, id: &str) -> Result<bool> {
+        let _opening_row = self.lock_opening_row();
+        if self.rt().launching.contains_key(id) {
+            return Ok(false);
+        }
+        Ok(self.get(id)?.is_some_and(|s| s.tmux_session.is_none() && !s.state.is_terminal()))
+    }
+
     /// The first supervision pass after a start (th-0937a1): every live row
     /// of ours whose host session is gone, and that was launched in an earlier
     /// boot or outlived a clean quit, was interrupted. An agent whose
@@ -3974,7 +4005,7 @@ impl Engine {
             // SMOODEV-4267: an agent's row exists before its process does. A
             // daemon that died in between left one that nothing would ever
             // launch, and that would read `starting` forever.
-            if s.tmux_session.is_none() && s.kind.is_agent() && !self.rt().launching.contains_key(&s.id) {
+            if s.tmux_session.is_none() && s.kind.is_agent() && self.launch_was_lost(&s.id)? {
                 let att = Attention::new(LAUNCH_FAILED).with_detail("the daemon stopped before this session launched");
                 self.set_state(&s.id, SessionState::Dead, Some(att))?;
                 continue;
@@ -7484,8 +7515,10 @@ quiet_ms = 300
         soon("the launch", || launched(&e, &s.id));
         let target = e.pane(&row(&e, &s.id)).unwrap();
         soon("what was typed arrives", || host.typed(&target) == b"hello");
-        let clients = e.lock_ptys().get(&s.id).map(|b| b.pty.clients().load(std::sync::atomic::Ordering::Relaxed));
-        assert_eq!(clients, Some(1), "two attached, one left");
+        // Typed input is delivered before the waiting clients attach, so the count can lag it.
+        soon("two attached, one left", || {
+            e.lock_ptys().get(&s.id).map(|b| b.pty.clients().load(std::sync::atomic::Ordering::Relaxed)) == Some(1)
+        });
         assert_eq!(row(&e, &s.id).state, SessionState::Starting, "launched is not ready");
     }
 
@@ -7670,6 +7703,59 @@ quiet_ms = 300
             SessionState::Starting,
             "one still on its way to the host is left alone"
         );
+    }
+
+    /// Restore runs alongside new sessions: a row caught between its creation
+    /// and being marked as launching must wait, not be called lost.
+    #[test]
+    fn a_row_being_opened_is_not_called_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let id = e.plan_agent(&mut agent_request(tmp.path())).unwrap().session.id;
+        e.rt().launching.remove(&id);
+        let opening_row = e.lock_opening_row();
+        let checker = {
+            let (e, id) = (e.clone(), id.clone());
+            std::thread::spawn(move || e.launch_was_lost(&id).unwrap())
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        e.rt().launching.insert(id, PendingOpen::default());
+        drop(opening_row);
+        assert!(!checker.join().unwrap());
+    }
+
+    /// Restore's list of rows can predate a launch that has since finished.
+    #[test]
+    fn a_launched_row_or_a_finished_one_is_not_called_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        soon("the launch", || launched(&e, &s.id));
+        assert!(!e.launch_was_lost(&s.id).unwrap());
+        let closed = e.plan_agent(&mut agent_request(tmp.path())).unwrap().session.id;
+        e.rt().launching.remove(&closed);
+        assert!(e.launch_was_lost(&closed).unwrap());
+        e.set_state(&closed, SessionState::Dead, None).unwrap();
+        assert!(!e.launch_was_lost(&closed).unwrap());
+        assert!(!e.launch_was_lost("no-such-row").unwrap());
+    }
+
+    /// A remote agent launches on its caller's thread, and restore can run meanwhile.
+    #[test]
+    fn restore_leaves_a_remote_agent_that_is_still_launching() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let release = host.hold_next_launch();
+        let opener = {
+            let e = e.clone();
+            std::thread::spawn(move || remote_new(&e, SessionKind::Claude, "box", None, None).unwrap())
+        };
+        soon("the row", || !e.rt().launching.is_empty());
+        e.restore_interrupted().unwrap();
+        release.send(()).unwrap();
+        let s = opener.join().unwrap();
+        assert_ne!(row(&e, &s.id).state, SessionState::Dead);
+        assert!(e.rt().launching.is_empty());
     }
 
     /// The manifests are kept until a file changes, and a new one is seen
@@ -8662,8 +8748,17 @@ quiet_ms = 300
         e.restore_interrupted().unwrap();
         let a = e.get(&agent.id).unwrap().unwrap();
         assert_eq!(a.attention.as_ref().unwrap().reason, RESTORABLE, "{a:?}");
+        // The restore thread relaunches at once and clears the note, so it may
+        // already be gone: check it only if it's still there, then wait for the
+        // outcome that matters.
         let sh = e.get(&shell.id).unwrap().unwrap();
-        assert!(sh.attention.unwrap().detail.unwrap().contains("reconnecting to box"));
+        if let Some(detail) = sh.attention.and_then(|att| att.detail) {
+            assert!(detail.contains("reconnecting to box"), "{detail}");
+        }
+        soon("the shell reconnects over ssh", || {
+            let s = e.get(&shell.id).unwrap().unwrap();
+            s.state == SessionState::Idle && host.session(&host_ref(&s)).is_some_and(|h| h.argv[0] == "ssh")
+        });
     }
 
     /// Kill & Resume on a live remote shell is a fresh `ssh`, and it ends ready.
