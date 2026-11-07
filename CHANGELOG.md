@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.95.1
+
+### Patch Changes
+
+- c94f796: SmoothFlow no longer kills an agent session opened just after the daemon starts. Restore could mistake it for one lost in a crash and mark it dead with "the daemon stopped before this session launched".
+
 ## 0.95.0
 
 ### Minor Changes
